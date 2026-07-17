@@ -29,6 +29,7 @@ import lead_store
 import qualification
 import send
 import base_import
+import run_history
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8 MB cap on uploads
@@ -159,6 +160,11 @@ def importar_analisar():
     except Exception as exc:  # noqa: BLE001 - surface any parse error to the user
         os.remove(path)
         return _render_import_form(erro=f"Nao consegui ler a planilha: {exc}"), 400
+    run_history.record(
+        "Analise",
+        f"{file.filename}: {analysis['total_rows']} linhas, {len(analysis['clean'])} BR, "
+        f"{len(analysis['internacionais'])} internacionais, {analysis['removed_duplicates']} duplicados",
+    )
     return _render_import_review(token, analysis)
 
 
@@ -176,6 +182,11 @@ def importar_confirmar():
         contacts += analysis["internacionais"]
     imported, skipped = lead_store.import_contacts(contacts)
     os.remove(path)
+    run_history.record(
+        "Importacao",
+        f"{imported} contatos importados, {skipped} ja existiam"
+        + (f", incluindo {len(analysis['internacionais'])} internacionais" if include_intl else ""),
+    )
     return _render_import_done(imported, skipped, include_intl,
                                len(analysis["internacionais"]))
 
@@ -249,37 +260,45 @@ _IMPORT_JS = """
   var errEl = document.getElementById('file-error');
   var submit = document.getElementById('submit-btn');
   var form = document.getElementById('import-form');
+  var progWrap = document.getElementById('progress-wrap');
+  var progBar = document.getElementById('progress-bar');
+  var progPct = document.getElementById('progress-pct');
   if (!input) return;
+
+  var selected = null;
+  var xhr = null;
 
   function fmtSize(b) {
     if (b < 1024) return b + ' B';
     if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
     return (b / 1048576).toFixed(1) + ' MB';
   }
-  function showError(msg) {
-    errEl.textContent = msg; errEl.hidden = false;
-    card.hidden = true; submit.disabled = true;
+  function reset() {
+    if (xhr) { try { xhr.abort(); } catch (e) {} xhr = null; }
+    selected = null; input.value = '';
+    card.hidden = true; errEl.hidden = true;
+    progWrap.hidden = true; progBar.style.width = '0%'; if (progPct) progPct.textContent = '';
+    submit.disabled = true; submit.textContent = 'Analisar planilha'; submit.classList.remove('loading');
+    dz.hidden = false;
   }
-  function showFile(f) {
+  window.cancelUpload = reset;
+
+  function chooseFile(f) {
+    if (!f.name.toLowerCase().endsWith('.xlsx')) {
+      errEl.textContent = 'Esse arquivo nao e .xlsx. Envie uma planilha do Excel.';
+      errEl.hidden = false; input.value = '';
+      return;
+    }
+    selected = f;
     errEl.hidden = true;
     nameEl.textContent = f.name;
     sizeEl.textContent = fmtSize(f.size);
-    card.hidden = false;
+    card.hidden = false; dz.hidden = true;
+    progWrap.hidden = true; progBar.style.width = '0%';
     submit.disabled = false;
   }
-  function handle(files) {
-    if (!files || !files.length) return;
-    var f = files[0];
-    if (!f.name.toLowerCase().endsWith('.xlsx')) {
-      showError('Esse arquivo nao e .xlsx. Envie uma planilha do Excel.');
-      input.value = '';
-      return;
-    }
-    showFile(f);
-  }
-  window.clearFile = function () {
-    input.value = ''; card.hidden = true; submit.disabled = true; errEl.hidden = true;
-  };
+  function handle(files) { if (files && files.length) chooseFile(files[0]); }
+
   input.addEventListener('change', function () { handle(input.files); });
   ['dragenter', 'dragover'].forEach(function (ev) {
     dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.add('drag'); });
@@ -289,12 +308,42 @@ _IMPORT_JS = """
   });
   dz.addEventListener('drop', function (e) {
     var dt = e.dataTransfer;
-    if (dt && dt.files && dt.files.length) { input.files = dt.files; handle(dt.files); }
+    if (dt && dt.files && dt.files.length) handle(dt.files);
   });
-  form.addEventListener('submit', function () {
-    submit.disabled = true;
-    submit.textContent = 'Analisando';
-    submit.classList.add('loading');
+
+  function failMsg(msg) {
+    errEl.textContent = msg; errEl.hidden = false;
+    progWrap.hidden = true;
+    submit.disabled = false; submit.classList.remove('loading'); submit.textContent = 'Analisar planilha';
+    xhr = null;
+  }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    if (!selected) return;
+    var fd = new FormData();
+    fd.append('arquivo', selected, selected.name);
+    xhr = new XMLHttpRequest();
+    xhr.open('POST', '/importar/analisar');
+    submit.disabled = true; submit.classList.add('loading'); submit.textContent = 'Enviando';
+    progWrap.hidden = false; progBar.style.width = '0%';
+    xhr.upload.onprogress = function (ev) {
+      if (ev.lengthComputable) {
+        var pct = Math.round(ev.loaded / ev.total * 100);
+        progBar.style.width = pct + '%';
+        if (progPct) progPct.textContent = pct + '%';
+        if (pct >= 100) submit.textContent = 'Analisando';
+      }
+    };
+    xhr.onload = function () {
+      if (xhr.status === 200) {
+        document.open(); document.write(xhr.responseText); document.close();
+      } else {
+        failMsg('Erro no envio (' + xhr.status + '). Tente de novo.');
+      }
+    };
+    xhr.onerror = function () { failMsg('Falha de conexao no envio. Tente de novo.'); };
+    xhr.send(fd);
   });
 })();
 </script>
@@ -426,18 +475,30 @@ _SHARED_CSS = """<style>
   .dz-title { font-size: 14px; color: var(--text-primary); font-weight: 600; }
   .dz-hint { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
   .file-card { display: flex; align-items: center; gap: 12px; margin-top: 14px; padding: 12px 14px;
-               border: 1px solid var(--status-good); background: var(--status-good-bg); border-radius: 10px; }
-  .file-check { color: var(--status-good); font-weight: 700; font-size: 16px; }
+               border: 1px solid var(--border); background: var(--surface-1); border-radius: 10px; }
+  .file-icon { color: var(--status-good); display: flex; align-items: center; }
   .file-meta { flex: 1; min-width: 0; }
   .file-name { font-size: 13px; font-weight: 600; color: var(--text-primary);
                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .file-size { font-size: 12px; color: var(--text-muted); }
+  .progress { height: 6px; background: var(--page); border-radius: 3px; overflow: hidden; margin-top: 8px; }
+  .progress-bar { height: 100%; width: 0%; background: var(--accent); border-radius: 3px; transition: width .12s linear; }
+  .progress-pct { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; min-width: 34px; text-align: right; }
   .file-remove { background: transparent; border: none; color: var(--text-muted); font-size: 20px;
                  cursor: pointer; line-height: 1; padding: 0 4px; }
   .btn.loading::after { content: ''; display: inline-block; width: 12px; height: 12px; margin-left: 8px;
     border: 2px solid rgba(255,255,255,0.5); border-top-color: #fff; border-radius: 50%;
     vertical-align: middle; animation: spin .7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  .hist-list { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface-1); }
+  .hist-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  .hist-row:last-child { border-bottom: none; }
+  .hist-when { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .hist-detail { font-size: 13px; color: var(--text-secondary); flex: 1; min-width: 0; }
+  @media (max-width: 520px) {
+    .hist-row { flex-wrap: wrap; gap: 6px; }
+    .hist-detail { flex-basis: 100%; }
+  }
 
   @media (max-width: 520px) {
     .signals { grid-template-columns: 1fr; }
@@ -596,6 +657,29 @@ _UPLOAD_ICON = (
     '<polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>'
 )
 
+# Spreadsheet (xlsx) file-type icon shown next to the selected file.
+_XLSX_ICON = (
+    '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" '
+    'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>'
+    '<polyline points="14 2 14 8 20 8"/>'
+    '<line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>'
+)
+
+
+def _render_history():
+    items = run_history.recent(10)
+    if not items:
+        return '<div class="empty-state">Nenhuma execucao ainda.</div>'
+    rows = "".join(
+        f"""<div class="hist-row">
+          <span class="hist-when">{_e(it.get('quando'))}</span>
+          <span class="chip {'chip-good' if it.get('acao') == 'Importacao' else 'chip-info'}">{_e(it.get('acao'))}</span>
+          <span class="hist-detail">{_e(it.get('detalhe'))}</span>
+        </div>""" for it in items
+    )
+    return f'<div class="hist-list">{rows}</div>'
+
 
 def _render_import_form(erro=None):
     alert = f'<div class="alert alert-bad">{_e(erro)}</div>' if erro else ""
@@ -614,17 +698,25 @@ def _render_import_form(erro=None):
           <div class="dz-hint">Apenas arquivos .xlsx</div>
         </div>
         <div id="file-card" class="file-card" hidden>
-          <span class="file-check">&#10003;</span>
+          <span class="file-icon">{_XLSX_ICON}</span>
           <div class="file-meta">
             <div id="file-name" class="file-name"></div>
             <div id="file-size" class="file-size"></div>
+            <div id="progress-wrap" class="progress" hidden>
+              <div id="progress-bar" class="progress-bar"></div>
+            </div>
           </div>
-          <button type="button" class="file-remove" onclick="clearFile()" title="Remover">&times;</button>
+          <span id="progress-pct" class="progress-pct"></span>
+          <button type="button" class="file-remove" onclick="cancelUpload()" title="Cancelar">&times;</button>
         </div>
         <div id="file-error" class="alert alert-bad" hidden></div>
         <button id="submit-btn" class="btn btn-primary" type="submit" disabled>Analisar planilha</button>
       </form>
     </div>
+  </section>
+  <section>
+    <h2>Historico de execucoes</h2>
+    {_render_history()}
   </section>""" + _IMPORT_JS
     return _page("Importar base", "Importacao de contatos", "importar", body)
 

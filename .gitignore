@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 leads*.json
+history*.json
 .env
 *.env
 venv/
