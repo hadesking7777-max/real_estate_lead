@@ -67,10 +67,24 @@ CREATE TABLE IF NOT EXISTS sends (
   ts REAL,
   ok INTEGER
 );
+CREATE TABLE IF NOT EXISTS tags (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  phone TEXT,
+  tag TEXT,
+  UNIQUE(phone, tag)
+);
+CREATE TABLE IF NOT EXISTS notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  phone TEXT,
+  text TEXT,
+  ts REAL
+);
 CREATE INDEX IF NOT EXISTS idx_history_phone ON history(phone);
 CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(stage);
 CREATE INDEX IF NOT EXISTS idx_leads_delivery ON leads(delivery);
 CREATE INDEX IF NOT EXISTS idx_sends_ts ON sends(ts);
+CREATE INDEX IF NOT EXISTS idx_tags_phone ON tags(phone);
+CREATE INDEX IF NOT EXISTS idx_notes_phone ON notes(phone);
 """
 
 
@@ -354,6 +368,64 @@ def next_pending_opener():
             "SELECT * FROM leads WHERE stage='pendente' ORDER BY phone LIMIT 1"
         ).fetchone()
         return _row_to_lead(conn, row, with_history=False) if row else None
+
+
+def add_tag(phone, tag):
+    tag = (tag or "").strip()
+    if not tag:
+        return
+    _ensure_init()
+    with _conn() as conn:
+        conn.execute("INSERT OR IGNORE INTO tags(phone, tag) VALUES(?,?)", (phone, tag))
+        conn.commit()
+
+
+def remove_tag(phone, tag):
+    _ensure_init()
+    with _conn() as conn:
+        conn.execute("DELETE FROM tags WHERE phone=? AND tag=?", (phone, tag))
+        conn.commit()
+
+
+def get_tags(phone):
+    _ensure_init()
+    with _conn() as conn:
+        return [r["tag"] for r in
+                conn.execute("SELECT tag FROM tags WHERE phone=? ORDER BY tag", (phone,))]
+
+
+def tags_map():
+    """phone -> [tags], for the contacts table without an N+1."""
+    _ensure_init()
+    out = {}
+    with _conn() as conn:
+        for r in conn.execute("SELECT phone, tag FROM tags ORDER BY tag"):
+            out.setdefault(r["phone"], []).append(r["tag"])
+    return out
+
+
+def all_tag_names():
+    _ensure_init()
+    with _conn() as conn:
+        return [r["tag"] for r in
+                conn.execute("SELECT DISTINCT tag FROM tags ORDER BY tag")]
+
+
+def add_note(phone, text, ts):
+    text = (text or "").strip()
+    if not text:
+        return
+    _ensure_init()
+    with _conn() as conn:
+        conn.execute("INSERT INTO notes(phone, text, ts) VALUES(?,?,?)", (phone, text, ts))
+        conn.commit()
+
+
+def get_notes(phone):
+    _ensure_init()
+    with _conn() as conn:
+        return [{"text": r["text"], "ts": r["ts"]} for r in
+                conn.execute("SELECT text, ts FROM notes WHERE phone=? ORDER BY id DESC", (phone,))]
 
 
 def due_followup(now, delay1, delay2):

@@ -20,7 +20,9 @@ Give Lucas the same public URL + /painel, plus PANEL_USER/PANEL_PASSWORD.
 
 import html
 import os
+import time
 import uuid
+from datetime import datetime, timedelta
 from functools import wraps
 
 from flask import Flask, request, jsonify, Response, redirect
@@ -181,6 +183,47 @@ def campanha_iniciar():
 def campanha_pausar():
     scheduler.pause_campaign()
     return redirect("/painel")
+
+
+@app.route("/contato/<phone>")
+@_requires_auth
+def contato(phone):
+    lead = lead_store.get_lead(phone)
+    if not lead:
+        return _page("Contato", "Contato nao encontrado", "painel",
+                     '<section><div class="empty-state">Contato nao encontrado.</div>'
+                     '<p><a class="btn btn-ghost" href="/painel">Voltar</a></p></section>'), 404
+    return _render_contact(lead)
+
+
+@app.route("/contato/<phone>/etapa", methods=["POST"])
+@_requires_auth
+def contato_etapa(phone):
+    stage = request.form.get("stage", "")
+    if stage in lead_store.STAGES and lead_store.get_lead(phone):
+        lead_store.set_stage(phone, stage)
+    return redirect(f"/contato/{phone}")
+
+
+@app.route("/contato/<phone>/tag", methods=["POST"])
+@_requires_auth
+def contato_tag_add(phone):
+    lead_store.add_tag(phone, request.form.get("tag", ""))
+    return redirect(f"/contato/{phone}")
+
+
+@app.route("/contato/<phone>/tag/remover", methods=["POST"])
+@_requires_auth
+def contato_tag_remove(phone):
+    lead_store.remove_tag(phone, request.form.get("tag", ""))
+    return redirect(f"/contato/{phone}")
+
+
+@app.route("/contato/<phone>/nota", methods=["POST"])
+@_requires_auth
+def contato_nota(phone):
+    lead_store.add_note(phone, request.form.get("nota", ""), time.time())
+    return redirect(f"/contato/{phone}")
 
 
 @app.route("/importar/confirmar", methods=["POST"])
@@ -514,6 +557,44 @@ _SHARED_CSS = """<style>
   .campaign-metrics { font-size: 13px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
   .campaign-box form { margin: 0; }
   .campaign-box .btn { margin-right: 0; }
+
+  .contact-link { color: var(--accent); text-decoration: none; font-weight: 600; }
+  .contact-link:hover { text-decoration: underline; }
+  .row-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+  .chip.mini { font-size: 10px; padding: 1px 6px; }
+  .tag-more { font-size: 10px; color: var(--text-muted); align-self: center; }
+  .back-link { display: inline-block; color: var(--text-secondary); text-decoration: none; font-size: 13px; margin-bottom: 14px; }
+  .back-link:hover { color: var(--accent); }
+  .contact-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; flex-wrap: wrap;
+                    background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; box-shadow: var(--shadow); }
+  .contact-name { font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
+  .contact-sub { font-size: 13px; color: var(--text-muted); margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .contact-chips { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .contact-chips .btn { margin: 0; padding: 8px 14px; font-size: 13px; }
+  .tag-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .tag-group-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-muted); font-weight: 700; min-width: 90px; }
+  .tag-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600;
+              padding: 3px 6px 3px 9px; border-radius: 6px; background: var(--status-info-bg); color: var(--status-info); }
+  .tag-x { display: inline; margin: 0; }
+  .tag-x button { background: transparent; border: none; color: var(--status-info); cursor: pointer; font-size: 15px; line-height: 1; padding: 0 2px; }
+  .inline-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+  .inline-input { width: auto; flex: 1 1 200px; margin-bottom: 0; }
+  .inline-form .btn { margin: 0; }
+  .select { padding: 10px 12px; border-radius: 9px; border: 1px solid var(--border);
+            background: var(--surface-1); color: var(--text-primary); font-size: 14px; }
+  .notes-list { margin-top: 14px; }
+  .note-item { display: flex; gap: 12px; padding: 8px 0; border-top: 1px solid var(--border); font-size: 13px; }
+  .note-when { color: var(--text-muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .timeline { display: flex; flex-direction: column; gap: 10px; }
+  .tl-system { text-align: center; font-size: 12px; color: var(--text-muted); padding: 4px 0; }
+  .tl-tmpl { display: inline-block; margin-left: 6px; font-family: ui-monospace, monospace; font-size: 11px; opacity: 0.8; }
+  .tl-msg { max-width: 78%; }
+  .tl-in { align-self: flex-start; }
+  .tl-out { align-self: flex-end; text-align: right; }
+  .tl-who { font-size: 11px; color: var(--text-muted); margin-bottom: 3px; }
+  .tl-bubble { display: inline-block; padding: 10px 13px; border-radius: 12px; font-size: 13px; line-height: 1.4;
+               border: 1px solid var(--border); background: var(--surface-1); text-align: left; }
+  .tl-out .tl-bubble { background: var(--status-info-bg); border-color: transparent; }
   .alert { padding: 12px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 14px; }
   .alert-good { color: var(--status-good); background: var(--status-good-bg); }
   .alert-bad { color: var(--status-bad); background: var(--status-bad-bg); }
@@ -617,6 +698,153 @@ def _page(title, subtitle, active, body):
     )
 
 
+def _fmt_ts(ts):
+    if not ts:
+        return ""
+    return (datetime.utcfromtimestamp(ts) - timedelta(hours=3)).strftime("%d/%m/%Y %H:%M")
+
+
+def _auto_tags(lead):
+    tags = ["PJ" if str(lead.get("perfil", "")).startswith("PJ") else "PF"]
+    if lead.get("origem") == "Internacional":
+        tags.append("Internacional")
+        if lead.get("pais"):
+            tags.append(lead["pais"])
+    else:
+        tags.append("SP capital" if str(lead.get("phone", "")).startswith("5511") else "Interior BR")
+    s = lead.get("signals", {}) or {}
+    fp = (s.get("forma_pagamento") or "").lower()
+    if "vista" in fp:
+        tags.append("A vista")
+    elif "financ" in fp:
+        tags.append("Financiado")
+    tm = (s.get("timing") or "").lower()
+    if "agora" in tm or "curto" in tm:
+        tags.append("Timing curto")
+    ex = (s.get("experiencia") or "").lower()
+    if "investe" in ex or "recorrente" in ex or "portfolio" in ex or "portfólio" in ex:
+        tags.append("Investidor recorrente")
+    ob = (s.get("objetivo") or "").lower()
+    if "renda" in ob or "aluguel" in ob or "locac" in ob or "locaç" in ob:
+        tags.append("Renda")
+    if "valoriz" in ob:
+        tags.append("Valorizacao")
+    return tags
+
+
+def _timeline_html(lead):
+    items = ""
+    kind_labels = {"opener": "Abertura enviada", "followup1": "Follow-up 1 enviado",
+                   "followup2": "Follow-up 2 enviado", "template": "Mensagem enviada"}
+    for h in lead["history"]:
+        role, text = h["role"], (h["text"] or "")
+        if role == "bot" and text.startswith("["):
+            inner = text.strip("[]")
+            kind = inner.split(":")[0]
+            tmpl = inner.split(":", 1)[1] if ":" in inner else ""
+            items += (f'<div class="tl-system">{kind_labels.get(kind, "Mensagem enviada")}'
+                      f'<span class="tl-tmpl">{_e(tmpl)}</span></div>')
+        elif role == "lead":
+            items += (f'<div class="tl-msg tl-in"><div class="tl-who">Investidor</div>'
+                      f'<div class="tl-bubble">{_e(text)}</div></div>')
+        else:
+            items += (f'<div class="tl-msg tl-out"><div class="tl-who">Assistente</div>'
+                      f'<div class="tl-bubble">{_e(text)}</div></div>')
+    return items or '<div class="empty-state">Nenhuma mensagem ainda.</div>'
+
+
+def _render_contact(lead):
+    phone = lead["phone"]
+    auto = _auto_tags(lead)
+    manual = lead_store.get_tags(phone)
+    notes = lead_store.get_notes(phone)
+    s = lead["signals"]
+
+    auto_chips = "".join(f'<span class="chip chip-muted">{_e(t)}</span>' for t in auto) or '<span class="muted-text">-</span>'
+    manual_chips = "".join(
+        f'<span class="tag-chip">{_e(t)}'
+        f'<form method="post" action="/contato/{_e(phone)}/tag/remover" class="tag-x">'
+        f'<input type="hidden" name="tag" value="{_e(t)}"><button type="submit" title="Remover">&times;</button></form>'
+        f"</span>" for t in manual
+    ) or '<span class="muted-text">Nenhuma tag manual.</span>'
+
+    stage_opts = "".join(
+        f'<option value="{sk}"{" selected" if lead["stage"] == sk else ""}>{_e(STAGE_LABELS.get(sk, sk))}</option>'
+        for sk in lead_store.STAGES
+    )
+    signals_html = "".join(
+        f'<div><span class="signal-label">{lbl}</span>{_e(s.get(k) or "-")}</div>'
+        for k, lbl in [("objetivo", "Objetivo"), ("experiencia", "Experiencia"),
+                       ("forma_pagamento", "Forma de pagamento"),
+                       ("quantidade_unidades", "Unidades"), ("timing", "Timing")]
+    )
+    notes_list = "".join(
+        f'<div class="note-item"><span class="note-when">{_fmt_ts(n["ts"])}</span>'
+        f'<span>{_e(n["text"])}</span></div>' for n in notes
+    ) or '<div class="empty-state">Nenhuma nota ainda.</div>'
+
+    body = f"""
+  <a class="back-link" href="/painel">&larr; Voltar ao painel</a>
+  <section>
+    <div class="contact-header">
+      <div>
+        <div class="contact-name">{_e(lead["nome"] or "(sem nome)")}</div>
+        <div class="contact-sub">{_e(phone)} &middot; {_e(lead["pais"] or lead["origem"])}</div>
+      </div>
+      <div class="contact-chips">
+        <span class="chip chip-muted">{_e(lead["perfil"])}</span>
+        <span class="chip chip-info">{_e(STAGE_LABELS.get(lead["stage"], lead["stage"]))}</span>
+        {_delivery_chip(lead.get("delivery", "pendente"))}
+        <a class="btn btn-primary" href="https://wa.me/{_e(phone)}" target="_blank" rel="noopener">Abrir no WhatsApp</a>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Tags</h2>
+    <div class="panel-box">
+      <div class="tag-group"><span class="tag-group-label">Automaticas</span>{auto_chips}</div>
+      <div class="tag-group"><span class="tag-group-label">Manuais</span>{manual_chips}</div>
+      <form method="post" action="/contato/{_e(phone)}/tag" class="inline-form">
+        <input class="search inline-input" type="text" name="tag" placeholder="Nova tag..." maxlength="40" required>
+        <button class="btn btn-ghost" type="submit">Adicionar</button>
+      </form>
+    </div>
+  </section>
+
+  <section>
+    <h2>Etapa</h2>
+    <div class="panel-box">
+      <form method="post" action="/contato/{_e(phone)}/etapa" class="inline-form">
+        <select class="select" name="stage">{stage_opts}</select>
+        <button class="btn btn-ghost" type="submit">Atualizar etapa</button>
+      </form>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sinais de qualificacao</h2>
+    <div class="panel-box"><div class="signals">{signals_html}</div></div>
+  </section>
+
+  <section>
+    <h2>Notas</h2>
+    <div class="panel-box">
+      <form method="post" action="/contato/{_e(phone)}/nota" class="inline-form">
+        <input class="search inline-input" type="text" name="nota" placeholder="Escrever uma nota..." maxlength="300" required>
+        <button class="btn btn-ghost" type="submit">Adicionar nota</button>
+      </form>
+      <div class="notes-list">{notes_list}</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Conversa</h2>
+    <div class="timeline">{_timeline_html(lead)}</div>
+  </section>"""
+    return _page(lead["nome"] or phone, "Detalhe do contato", "painel", body)
+
+
 def _render_campaign():
     s = scheduler.status_summary()
     status = s["status"]
@@ -718,13 +946,20 @@ def _render_panel_html():
     if not hot:
         cards = '<div class="empty-state">Nenhum lead quente ainda. Assim que um investidor esquentar, aparece aqui.</div>'
 
+    tmap = lead_store.tags_map()
     table_rows = ""
     for lead in leads:
-        haystack = _e(f"{lead.get('nome','')} {lead.get('phone','')} {lead.get('pais','')}").lower()
+        phone = lead["phone"]
+        alltags = _auto_tags(lead) + tmap.get(phone, [])
+        haystack = _e(f"{lead.get('nome','')} {phone} {lead.get('pais','')} {' '.join(alltags)}").lower()
+        chips = "".join(f'<span class="chip chip-muted mini">{_e(t)}</span>' for t in alltags[:3])
+        if len(alltags) > 3:
+            chips += f'<span class="tag-more">+{len(alltags) - 3}</span>'
         table_rows += f"""
         <tr data-search="{haystack}">
-          <td>{_e(lead.get('nome') or '(sem nome)')}</td>
-          <td class="num">{_e(lead.get('phone'))}</td>
+          <td><a class="contact-link" href="/contato/{_e(phone)}">{_e(lead.get('nome') or '(sem nome)')}</a>
+              <div class="row-tags">{chips}</div></td>
+          <td class="num">{_e(phone)}</td>
           <td>{_e(lead.get('perfil'))}</td>
           <td>{_e(lead.get('pais') or lead.get('origem') or '-')}</td>
           <td>{_e(STAGE_LABELS.get(lead.get('stage'), lead.get('stage')))}</td>
