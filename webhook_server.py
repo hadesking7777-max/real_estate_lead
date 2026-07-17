@@ -361,6 +361,8 @@ _SHARED_CSS = """<style>
     --status-bad: #d03b3b; --status-bad-bg: #fbe9e9;
     --accent: #2a78d6; --accent-ink: #ffffff;
     --header-bg: #0d366b; --nav-bg: #fcfcfb;
+    --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 1px 3px rgba(16,24,40,0.06);
+    --shadow-lg: 0 6px 16px rgba(16,24,40,0.10);
   }
   @media (prefers-color-scheme: dark) {
     :root:where(:not([data-theme="light"])) {
@@ -374,6 +376,8 @@ _SHARED_CSS = """<style>
       --status-bad: #e66767; --status-bad-bg: rgba(208,59,59,0.18);
       --accent: #3987e5; --accent-ink: #ffffff;
       --header-bg: #184f95; --nav-bg: #1a1a19;
+      --shadow: 0 1px 2px rgba(0,0,0,0.30);
+      --shadow-lg: 0 6px 18px rgba(0,0,0,0.45);
     }
   }
   :root[data-theme="dark"] {
@@ -387,41 +391,59 @@ _SHARED_CSS = """<style>
     --status-bad: #e66767; --status-bad-bg: rgba(208,59,59,0.18);
     --accent: #3987e5; --accent-ink: #ffffff;
     --header-bg: #184f95; --nav-bg: #1a1a19;
+    --shadow: 0 1px 2px rgba(0,0,0,0.30);
+    --shadow-lg: 0 6px 18px rgba(0,0,0,0.45);
   }
   * { box-sizing: border-box; }
-  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0;
-         background: var(--page); color: var(--text-primary); }
-  header { background: var(--header-bg); color: white; padding: 20px 24px; }
-  header h1 { margin: 0; font-size: 19px; font-weight: 600; }
-  header p { margin: 4px 0 0; font-size: 13px; opacity: 0.85; }
-  .nav { display: flex; gap: 4px; background: var(--nav-bg); border-bottom: 1px solid var(--border);
+  [hidden] { display: none !important; }
+  html { scroll-behavior: smooth; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0;
+         background: var(--page); color: var(--text-primary); line-height: 1.45;
+         -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+  header { background-color: var(--header-bg);
+           background-image: linear-gradient(135deg, rgba(255,255,255,0.06), rgba(0,0,0,0.14)); color: #fff; }
+  .header-inner { max-width: 960px; margin: 0 auto; padding: 18px 20px; display: flex; align-items: center; gap: 14px; }
+  .brand { width: 40px; height: 40px; border-radius: 11px; background: rgba(255,255,255,0.14);
+           display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 15px;
+           letter-spacing: 0.5px; border: 1px solid rgba(255,255,255,0.20); flex-shrink: 0; }
+  .header-text h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.2px; }
+  .header-text p { margin: 3px 0 0; font-size: 13px; opacity: 0.82; }
+  .nav { background: var(--nav-bg); border-bottom: 1px solid var(--border);
          padding: 0 20px; position: sticky; top: 0; z-index: 10; }
-  .nav-item { padding: 12px 14px; font-size: 13px; color: var(--text-secondary);
-              text-decoration: none; border-bottom: 2px solid transparent; }
+  .nav-inner { display: flex; gap: 2px; max-width: 960px; margin: 0 auto; }
+  .nav-item { display: inline-flex; align-items: center; gap: 7px; padding: 13px 14px; font-size: 13px;
+              color: var(--text-secondary); text-decoration: none; border-bottom: 2px solid transparent;
+              transition: color .15s ease, border-color .15s ease; }
+  .nav-item:hover { color: var(--text-primary); }
   .nav-item.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
-  main { padding: 20px; max-width: 960px; margin: 0 auto; }
+  .nav-ic { display: flex; }
+  main { padding: 22px 20px 44px; max-width: 960px; margin: 0 auto; }
   section { margin-bottom: 28px; }
-  h2 { font-size: 15px; color: var(--text-secondary); font-weight: 600; margin: 0 0 12px; }
+  h2 { font-size: 12px; color: var(--text-muted); font-weight: 700; margin: 0 0 12px;
+       text-transform: uppercase; letter-spacing: 0.6px; display: flex; align-items: center; gap: 8px; }
+  h2::before { content: ''; width: 3px; height: 13px; background: var(--accent); border-radius: 2px; }
 
   .tiles { display: flex; flex-wrap: wrap; gap: 10px; }
-  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
-          padding: 14px 18px; flex: 1 1 110px; text-align: center; }
-  .tile-num { font-size: 26px; font-weight: 600; color: var(--text-primary); }
-  .tile-label { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
-  .tile-good { border-color: var(--status-good); }
+  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
+          padding: 16px 18px; flex: 1 1 110px; text-align: center; box-shadow: var(--shadow);
+          transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease; }
+  .tile:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); }
+  .tile-num { font-size: 27px; font-weight: 700; color: var(--text-primary); letter-spacing: -0.5px; line-height: 1.1; }
+  .tile-label { font-size: 11px; color: var(--text-muted); margin-top: 5px; text-transform: uppercase; letter-spacing: 0.4px; font-weight: 600; }
+  .tile-good { border-color: var(--status-good); background: linear-gradient(180deg, var(--status-good-bg), var(--surface-1) 60%); }
   .tile-good .tile-num { color: var(--status-good); }
   .tile-warning .tile-num { color: var(--status-warning); }
   .tile-muted .tile-num { color: var(--text-muted); }
 
-  .funnel { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
-  .funnel-row { display: grid; grid-template-columns: 120px 1fr 150px; align-items: center; gap: 12px; padding: 7px 0; }
-  .funnel-label { font-size: 13px; color: var(--text-secondary); }
-  .funnel-track { background: var(--page); border-radius: 4px; height: 14px; overflow: hidden; }
-  .funnel-bar { height: 100%; border-radius: 4px 0 0 4px; min-width: 4px; }
+  .funnel { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; box-shadow: var(--shadow); }
+  .funnel-row { display: grid; grid-template-columns: 130px 1fr 150px; align-items: center; gap: 12px; padding: 8px 0; }
+  .funnel-label { font-size: 13px; color: var(--text-secondary); font-weight: 500; }
+  .funnel-track { background: var(--page); border-radius: 5px; height: 16px; overflow: hidden; }
+  .funnel-bar { height: 100%; border-radius: 5px; min-width: 5px; transition: width .5s cubic-bezier(.4,0,.2,1); }
   .funnel-value { font-size: 13px; color: var(--text-primary); font-weight: 600; text-align: right; }
   .funnel-pct { font-size: 12px; color: var(--text-muted); font-weight: 400; }
 
-  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin-bottom: 12px; }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px 20px; margin-bottom: 12px; box-shadow: var(--shadow); }
   .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 6px; }
   .name { font-weight: 600; font-size: 15px; }
   .badge-row { display: flex; gap: 8px; align-items: center; }
@@ -439,24 +461,35 @@ _SHARED_CSS = """<style>
   .chip-bad { color: var(--status-bad); background: var(--status-bad-bg); }
   .chip-muted { color: var(--text-muted); background: var(--page); }
 
-  .search { width: 100%; padding: 10px 12px; margin-bottom: 12px; border-radius: 8px;
-            border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); font-size: 14px; }
-  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+  .search { width: 100%; padding: 11px 13px; margin-bottom: 12px; border-radius: 9px;
+            border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary);
+            font-size: 14px; transition: border-color .15s ease, box-shadow .15s ease; }
+  .search:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--status-info-bg); }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); }
   table { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--surface-1); }
-  th { text-align: left; padding: 10px 12px; color: var(--text-muted); font-weight: 600;
-       border-bottom: 1px solid var(--border); white-space: nowrap; }
-  td { padding: 10px 12px; border-bottom: 1px solid var(--border); color: var(--text-primary); }
+  th { text-align: left; padding: 11px 13px; color: var(--text-muted); font-weight: 700; font-size: 11px;
+       text-transform: uppercase; letter-spacing: 0.4px; background: var(--surface-1);
+       border-bottom: 1px solid var(--border); white-space: nowrap; position: sticky; top: 0; }
+  td { padding: 11px 13px; border-bottom: 1px solid var(--border); color: var(--text-primary); }
+  tbody tr { transition: background .12s ease; }
+  tbody tr:hover td { background: var(--page); }
   tr:last-child td { border-bottom: none; }
   td.num { font-variant-numeric: tabular-nums; color: var(--text-secondary); }
 
-  .panel-box { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
-  .muted-text { color: var(--text-secondary); font-size: 13px; line-height: 1.5; }
-  .file-input { display: block; margin: 14px 0; font-size: 14px; color: var(--text-primary); }
+  .panel-box { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
+               padding: 22px; box-shadow: var(--shadow); }
+  .muted-text { color: var(--text-secondary); font-size: 13px; line-height: 1.55; }
   .checkbox { display: block; margin: 14px 0; font-size: 13px; color: var(--text-secondary); }
-  .btn { display: inline-block; padding: 10px 18px; border-radius: 8px; font-size: 14px; font-weight: 600;
-         border: 1px solid var(--border); cursor: pointer; text-decoration: none; margin-right: 8px; }
-  .btn-primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .btn { display: inline-flex; align-items: center; justify-content: center; padding: 11px 20px;
+         border-radius: 9px; font-size: 14px; font-weight: 600; border: 1px solid var(--border);
+         cursor: pointer; text-decoration: none; margin-right: 8px;
+         transition: transform .12s ease, box-shadow .15s ease, background .15s ease, filter .15s ease; }
+  .btn:active { transform: translateY(1px); }
+  .btn-primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent);
+                 box-shadow: 0 1px 2px rgba(16,24,40,0.10); }
+  .btn-primary:hover:not(:disabled) { filter: brightness(1.07); box-shadow: var(--shadow-lg); }
   .btn-ghost { background: transparent; color: var(--text-secondary); }
+  .btn-ghost:hover { background: var(--page); color: var(--text-primary); }
   .alert { padding: 12px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 14px; }
   .alert-good { color: var(--status-good); background: var(--status-good-bg); }
   .alert-bad { color: var(--status-bad); background: var(--status-bad-bg); }
@@ -519,14 +552,28 @@ def _delivery_chip(state):
     return f'<span class="chip {cls}">{DELIVERY_LABELS.get(state, state)}</span>'
 
 
+_NAV_ICON_FUNNEL = (
+    '<svg class="nav-ic" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" '
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    '<line x1="6" y1="20" x2="6" y2="13"/><line x1="12" y1="20" x2="12" y2="8"/>'
+    '<line x1="18" y1="20" x2="18" y2="4"/></svg>'
+)
+_NAV_ICON_IMPORT = (
+    '<svg class="nav-ic" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" '
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
+    '<polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>'
+)
+
+
 def _nav(active):
-    def item(href, label, key):
+    def item(href, label, key, icon):
         cls = "nav-item active" if key == active else "nav-item"
-        return f'<a class="{cls}" href="{href}">{label}</a>'
-    return ('<nav class="nav">'
-            + item("/painel", "Funil e contatos", "painel")
-            + item("/importar", "Importar base", "importar")
-            + "</nav>")
+        return f'<a class="{cls}" href="{href}">{icon}{label}</a>'
+    return ('<nav class="nav"><div class="nav-inner">'
+            + item("/painel", "Funil e contatos", "painel", _NAV_ICON_FUNNEL)
+            + item("/importar", "Importar base", "importar", _NAV_ICON_IMPORT)
+            + "</div></nav>")
 
 
 def _page(title, subtitle, active, body):
@@ -537,7 +584,9 @@ def _page(title, subtitle, active, body):
         f"<title>{_e(title)}</title>"
         + _SHARED_CSS
         + "</head><body>"
-        f'<header><h1>Guerra Cyrela &middot; Faria Lima</h1><p>{_e(subtitle)}</p></header>'
+        '<header><div class="header-inner"><div class="brand">GC</div>'
+        '<div class="header-text"><h1>Guerra Cyrela &middot; Faria Lima</h1>'
+        f'<p>{_e(subtitle)}</p></div></div></header>'
         + _nav(active)
         + f"<main>{body}</main>"
         + "</body></html>"
