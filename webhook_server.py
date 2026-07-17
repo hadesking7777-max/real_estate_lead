@@ -23,13 +23,14 @@ import os
 import uuid
 from functools import wraps
 
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, redirect
 
 import lead_store
 import qualification
 import send
 import base_import
 import run_history
+import scheduler
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8 MB cap on uploads
@@ -166,6 +167,20 @@ def importar_analisar():
         f"{len(analysis['internacionais'])} internacionais, {analysis['removed_duplicates']} duplicados",
     )
     return _render_import_review(token, analysis)
+
+
+@app.route("/campanha/iniciar", methods=["POST"])
+@_requires_auth
+def campanha_iniciar():
+    scheduler.start_campaign()
+    return redirect("/painel")
+
+
+@app.route("/campanha/pausar", methods=["POST"])
+@_requires_auth
+def campanha_pausar():
+    scheduler.pause_campaign()
+    return redirect("/painel")
 
 
 @app.route("/importar/confirmar", methods=["POST"])
@@ -492,6 +507,13 @@ _SHARED_CSS = """<style>
   .btn-ghost:hover { background: var(--page); color: var(--text-primary); }
   .form-actions { display: flex; justify-content: flex-end; margin-top: 20px; }
   .form-actions .btn { margin-right: 0; }
+  .campaign-box { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
+                  padding: 16px 20px; box-shadow: var(--shadow); display: flex; align-items: center;
+                  justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+  .campaign-info { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .campaign-metrics { font-size: 13px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+  .campaign-box form { margin: 0; }
+  .campaign-box .btn { margin-right: 0; }
   .alert { padding: 12px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 14px; }
   .alert-good { color: var(--status-good); background: var(--status-good-bg); }
   .alert-bad { color: var(--status-bad); background: var(--status-bad-bg); }
@@ -595,6 +617,40 @@ def _page(title, subtitle, active, body):
     )
 
 
+def _render_campaign():
+    s = scheduler.status_summary()
+    status = s["status"]
+    label = {"idle": "Parada", "running": "Rodando", "paused": "Pausada"}.get(status, status)
+    chip = {"idle": "chip-muted", "running": "chip-good", "paused": "chip-info"}.get(status, "chip-muted")
+    if status == "running":
+        action, btn_label, btn_cls = "/campanha/pausar", "Pausar", "btn-ghost"
+    else:
+        action = "/campanha/iniciar"
+        btn_label = "Retomar" if status == "paused" else "Iniciar campanha"
+        btn_cls = "btn-primary"
+    warn = ""
+    if status == "paused" and s["fail_streak"] >= scheduler.MAX_FAIL_STREAK:
+        warn = ('<div class="alert alert-bad">Campanha pausada automaticamente apos varias falhas de '
+                'envio. Confirme se os modelos ja foram aprovados na Meta antes de retomar.</div>')
+    metrics = (
+        f'Dia {s["day"]} &middot; Enviados hoje {s["sent_today"]}/{s["target"]} '
+        f'&middot; Total enviados {s["total_enviados"]} &middot; Pendentes {s["pendentes"]}'
+        if s["day"] else "Ainda nao iniciada"
+    )
+    return f"""
+  <section>
+    <h2>Campanha</h2>
+    {warn}
+    <div class="campaign-box">
+      <div class="campaign-info">
+        <span class="chip {chip}">{label}</span>
+        <span class="campaign-metrics">{metrics}</span>
+      </div>
+      <form method="post" action="{action}"><button class="btn {btn_cls}" type="submit">{btn_label}</button></form>
+    </div>
+  </section>"""
+
+
 def _render_panel_html():
     counts = lead_store.funnel_counts()
     deliv = lead_store.delivery_counts()
@@ -689,7 +745,7 @@ def _render_panel_html():
           <button class="btn btn-ghost" id="pager-next" onclick="pagerNext()">Proximo</button>
         </div>"""
 
-    body = f"""
+    body = _render_campaign() + f"""
   <section><div class="tiles">{kpi_tiles}</div></section>
   <section><h2>Funil</h2><div class="funnel">{funnel_rows}</div></section>
   <section><h2>Status de envio</h2><div class="tiles">{deliv_tiles}</div></section>
@@ -832,4 +888,5 @@ def _render_import_done(imported, skipped, include_intl, n_intl):
 
 
 if __name__ == "__main__":
+    scheduler.start_background()
     app.run(host="0.0.0.0", port=8000)

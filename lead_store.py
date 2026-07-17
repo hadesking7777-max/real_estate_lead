@@ -30,7 +30,7 @@ SIGNAL_KEYS = ["objetivo", "experiencia", "forma_pagamento", "quantidade_unidade
 
 # Columns update_lead is allowed to write directly (signals handled separately; phone is the key).
 _WRITABLE_COLS = ["nome", "perfil", "origem", "pais", "stage", "delivery",
-                  "last_template_used", "last_wamid", "followup_count"]
+                  "last_template_used", "last_wamid", "followup_count", "last_send_ts"]
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS leads (
@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS leads (
   signals TEXT,
   last_template_used TEXT,
   last_wamid TEXT,
-  followup_count INTEGER DEFAULT 0
+  followup_count INTEGER DEFAULT 0,
+  last_send_ts REAL
 );
 CREATE TABLE IF NOT EXISTS history (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,9 +53,24 @@ CREATE TABLE IF NOT EXISTS history (
   role TEXT,
   text TEXT
 );
+CREATE TABLE IF NOT EXISTS campaign (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  status TEXT DEFAULT 'idle',
+  start_ts REAL,
+  fail_streak INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS sends (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  phone TEXT,
+  kind TEXT,
+  template TEXT,
+  ts REAL,
+  ok INTEGER
+);
 CREATE INDEX IF NOT EXISTS idx_history_phone ON history(phone);
 CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(stage);
 CREATE INDEX IF NOT EXISTS idx_leads_delivery ON leads(delivery);
+CREATE INDEX IF NOT EXISTS idx_sends_ts ON sends(ts);
 """
 
 
@@ -81,8 +97,19 @@ def _ensure_init():
             return
         with _conn() as conn:
             conn.executescript(_SCHEMA)
+            _migrate_schema(conn)
         _maybe_migrate_json()
         _initialized_paths.add(DB_PATH)
+
+
+def _migrate_schema(conn):
+    # add columns introduced after a DB was first created
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(leads)")}
+    if "last_send_ts" not in cols:
+        conn.execute("ALTER TABLE leads ADD COLUMN last_send_ts REAL")
+    # guarantee the single campaign row exists
+    conn.execute("INSERT OR IGNORE INTO campaign(id, status, fail_streak) VALUES(1, 'idle', 0)")
+    conn.commit()
 
 
 def _maybe_migrate_json():
@@ -134,6 +161,7 @@ def _row_to_lead(conn, row, with_history=True):
         "last_template_used": row["last_template_used"],
         "last_wamid": row["last_wamid"],
         "followup_count": row["followup_count"] or 0,
+        "last_send_ts": row["last_send_ts"],
         "history": [],
     }
     if with_history:
@@ -270,3 +298,80 @@ def hot_leads():
     with _conn() as conn:
         rows = conn.execute("SELECT * FROM leads WHERE stage='quente' ORDER BY nome").fetchall()
         return [_row_to_lead(conn, r) for r in rows]
+
+
+# ---------- campaign state + send log (used by the automation scheduler) ----------
+
+def get_campaign():
+    _ensure_init()
+    with _conn() as conn:
+        r = conn.execute("SELECT status, start_ts, fail_streak FROM campaign WHERE id=1").fetchone()
+        return {"status": r["status"], "start_ts": r["start_ts"], "fail_streak": r["fail_streak"]}
+
+
+def set_campaign(**fields):
+    allowed = {"status", "start_ts", "fail_streak"}
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k}=?"); vals.append(v)
+    if not sets:
+        return get_campaign()
+    _ensure_init()
+    with _conn() as conn:
+        conn.execute(f"UPDATE campaign SET {', '.join(sets)} WHERE id=1", vals)
+        conn.commit()
+    return get_campaign()
+
+
+def record_send(phone, kind, template, ts, ok):
+    _ensure_init()
+    with _conn() as conn:
+        conn.execute("INSERT INTO sends(phone, kind, template, ts, ok) VALUES(?,?,?,?,?)",
+                     (phone, kind, template, ts, 1 if ok else 0))
+        conn.commit()
+
+
+def last_send_ts():
+    _ensure_init()
+    with _conn() as conn:
+        r = conn.execute("SELECT MAX(ts) AS m FROM sends").fetchone()
+        return r["m"]
+
+
+def count_ok_sends_between(ts_from, ts_to):
+    _ensure_init()
+    with _conn() as conn:
+        r = conn.execute("SELECT COUNT(*) AS c FROM sends WHERE ok=1 AND ts>=? AND ts<?",
+                         (ts_from, ts_to)).fetchone()
+        return r["c"]
+
+
+def next_pending_opener():
+    _ensure_init()
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM leads WHERE stage='pendente' ORDER BY phone LIMIT 1"
+        ).fetchone()
+        return _row_to_lead(conn, row, with_history=False) if row else None
+
+
+def due_followup(now, delay1, delay2):
+    """Highest-priority follow-up due, or None. Only 'contatado' (no reply yet)."""
+    _ensure_init()
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM leads WHERE stage='contatado' AND followup_count=1 "
+            "AND last_send_ts IS NOT NULL AND last_send_ts<=? ORDER BY last_send_ts LIMIT 1",
+            (now - delay2,),
+        ).fetchone()
+        if row:
+            return _row_to_lead(conn, row, with_history=False), "followup2"
+        row = conn.execute(
+            "SELECT * FROM leads WHERE stage='contatado' AND followup_count=0 "
+            "AND last_send_ts IS NOT NULL AND last_send_ts<=? ORDER BY last_send_ts LIMIT 1",
+            (now - delay1,),
+        ).fetchone()
+        if row:
+            return _row_to_lead(conn, row, with_history=False), "followup1"
+        return None
