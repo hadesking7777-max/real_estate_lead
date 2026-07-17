@@ -1,146 +1,217 @@
 """
-Local JSON-backed lead state store for the pilot. At 295 contacts this is
-plenty; swap for a real database only if the base grows past a pilot scale.
+SQLite-backed lead store. Same public API as the earlier JSON version, so
+nothing else in the app changes; the storage underneath is now a single
+SQLite file (transactional, safe for the concurrent access that the webhook,
+the background sender, and the UI will do once automation lands).
+
+On first use it auto-migrates a legacy leads.json (if present) into the DB,
+so existing imported contacts and any conversation history carry over.
 """
 
 import json
 import os
+import re
+import sqlite3
 import threading
 
-STORE_PATH = os.path.join(os.path.dirname(__file__), "leads.json")
-_lock = threading.Lock()
+DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "leads.db")
+DB_PATH = DEFAULT_DB_PATH
+_LEGACY_JSON = os.path.join(os.path.dirname(__file__), "leads.json")
+
+_init_lock = threading.Lock()
+_initialized_paths = set()
 
 STAGES = ["pendente", "contatado", "respondeu", "qualificando", "quente", "morno", "frio", "opt_out"]
 
-# WhatsApp delivery lifecycle. "pendente" = imported but not yet sent to.
 DELIVERY_STATES = ["pendente", "enviado", "entregue", "lido", "respondeu", "falhou"]
 _DELIVERY_RANK = {s: i for i, s in enumerate(DELIVERY_STATES)}
 
+SIGNAL_KEYS = ["objetivo", "experiencia", "forma_pagamento", "quantidade_unidades", "timing"]
+
+# Columns update_lead is allowed to write directly (signals handled separately; phone is the key).
+_WRITABLE_COLS = ["nome", "perfil", "origem", "pais", "stage", "delivery",
+                  "last_template_used", "last_wamid", "followup_count"]
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS leads (
+  phone TEXT PRIMARY KEY,
+  nome TEXT,
+  perfil TEXT,
+  origem TEXT,
+  pais TEXT,
+  stage TEXT,
+  delivery TEXT,
+  signals TEXT,
+  last_template_used TEXT,
+  last_wamid TEXT,
+  followup_count INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  phone TEXT,
+  role TEXT,
+  text TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_history_phone ON history(phone);
+CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(stage);
+CREATE INDEX IF NOT EXISTS idx_leads_delivery ON leads(delivery);
+"""
+
 
 def _digits(phone):
-    import re
     return re.sub(r"\D", "", str(phone))
 
 
-def _load():
-    if not os.path.exists(STORE_PATH):
-        return {}
-    with open(STORE_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+def _empty_signals():
+    return {k: None for k in SIGNAL_KEYS}
 
 
-def _save(data):
-    with open(STORE_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def _conn():
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def _ensure_init():
+    if DB_PATH in _initialized_paths:
+        return
+    with _init_lock:
+        if DB_PATH in _initialized_paths:
+            return
+        with _conn() as conn:
+            conn.executescript(_SCHEMA)
+        _maybe_migrate_json()
+        _initialized_paths.add(DB_PATH)
+
+
+def _maybe_migrate_json():
+    # Only migrate the real legacy file into the real DB, never in tests.
+    if DB_PATH != DEFAULT_DB_PATH or not os.path.exists(_LEGACY_JSON):
+        return
+    with _conn() as conn:
+        if conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]:
+            return
+        with open(_LEGACY_JSON, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        for phone, lead in data.items():
+            _insert_row(conn, phone, lead)
+            for h in lead.get("history", []):
+                conn.execute("INSERT INTO history(phone,role,text) VALUES(?,?,?)",
+                             (phone, h.get("role"), h.get("text")))
+        conn.commit()
+    try:
+        os.rename(_LEGACY_JSON, _LEGACY_JSON + ".migrated")
+    except OSError:
+        pass
+
+
+def _insert_row(conn, phone, lead):
+    conn.execute(
+        "INSERT OR IGNORE INTO leads(phone,nome,perfil,origem,pais,stage,delivery,"
+        "signals,last_template_used,last_wamid,followup_count) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            phone, lead.get("nome", ""), lead.get("perfil", "PF"),
+            lead.get("origem", "Brasil"), lead.get("pais", "Brasil"),
+            lead.get("stage", "pendente"), lead.get("delivery", "pendente"),
+            json.dumps(lead.get("signals") or _empty_signals()),
+            lead.get("last_template_used"), lead.get("last_wamid"),
+            lead.get("followup_count", 0),
+        ),
+    )
+
+
+def _row_to_lead(conn, row, with_history=True):
+    lead = {
+        "phone": row["phone"],
+        "nome": row["nome"] or "",
+        "perfil": row["perfil"] or "PF",
+        "origem": row["origem"] or "Brasil",
+        "pais": row["pais"] or "Brasil",
+        "stage": row["stage"],
+        "delivery": row["delivery"],
+        "signals": json.loads(row["signals"]) if row["signals"] else _empty_signals(),
+        "last_template_used": row["last_template_used"],
+        "last_wamid": row["last_wamid"],
+        "followup_count": row["followup_count"] or 0,
+        "history": [],
+    }
+    if with_history:
+        hrows = conn.execute(
+            "SELECT role, text FROM history WHERE phone=? ORDER BY id", (row["phone"],)
+        ).fetchall()
+        lead["history"] = [{"role": h["role"], "text": h["text"]} for h in hrows]
+    return lead
 
 
 def get_lead(phone):
-    with _lock:
-        data = _load()
-        return data.get(phone)
-
-
-def _new_lead(phone, nome=None, perfil="PF", origem="Brasil", pais="Brasil",
-              stage="contatado", delivery="enviado"):
-    return {
-        "phone": phone,
-        "nome": nome or "",
-        "perfil": perfil,
-        "origem": origem,
-        "pais": pais,
-        "stage": stage,
-        "delivery": delivery,
-        "history": [],
-        "signals": {
-            "objetivo": None,
-            "experiencia": None,
-            "forma_pagamento": None,
-            "quantidade_unidades": None,
-            "timing": None,
-        },
-        "last_template_used": None,
-        "last_wamid": None,
-        "followup_count": 0,
-    }
+    _ensure_init()
+    with _conn() as conn:
+        row = conn.execute("SELECT * FROM leads WHERE phone=?", (phone,)).fetchone()
+        return _row_to_lead(conn, row) if row else None
 
 
 def get_or_create_lead(phone, nome=None, perfil="PF"):
-    with _lock:
-        data = _load()
-        if phone not in data:
-            data[phone] = _new_lead(phone, nome=nome, perfil=perfil)
-            _save(data)
-        return data[phone]
+    _ensure_init()
+    with _conn() as conn:
+        row = conn.execute("SELECT * FROM leads WHERE phone=?", (phone,)).fetchone()
+        if row is None:
+            _insert_row(conn, phone, {
+                "nome": nome or "", "perfil": perfil,
+                "stage": "contatado", "delivery": "enviado",
+            })
+            conn.commit()
+            row = conn.execute("SELECT * FROM leads WHERE phone=?", (phone,)).fetchone()
+        return _row_to_lead(conn, row)
 
 
 def import_contacts(contacts):
-    """
-    Bulk-import contacts from the analyzed base. Each contact is a dict with
-    telefone_e164, nome, perfil, origem, pais. Sets stage/delivery to
-    'pendente' (imported, not yet contacted). Skips phones already present so
-    re-importing is safe and never overwrites live conversation state.
-    Returns (imported, skipped).
-    """
-    with _lock:
-        data = _load()
-        imported, skipped = 0, 0
+    _ensure_init()
+    imported = skipped = 0
+    with _conn() as conn:
         for c in contacts:
             phone = _digits(c["telefone_e164"])
-            if phone in data:
+            if conn.execute("SELECT 1 FROM leads WHERE phone=?", (phone,)).fetchone():
                 skipped += 1
                 continue
-            data[phone] = _new_lead(
-                phone,
-                nome=c.get("nome", ""),
-                perfil=("PJ" if str(c.get("perfil", "")).startswith("PJ") else "PF"),
-                origem=c.get("origem", "Brasil"),
-                pais=c.get("pais", "Brasil"),
-                stage="pendente",
-                delivery="pendente",
-            )
+            _insert_row(conn, phone, {
+                "nome": c.get("nome", ""),
+                "perfil": "PJ" if str(c.get("perfil", "")).startswith("PJ") else "PF",
+                "origem": c.get("origem", "Brasil"),
+                "pais": c.get("pais", "Brasil"),
+                "stage": "pendente", "delivery": "pendente",
+            })
             imported += 1
-        _save(data)
-        return imported, skipped
-
-
-def advance_delivery(phone, new_state):
-    """
-    Move a lead's delivery status forward only (never regress lido->entregue).
-    'respondeu' and 'falhou' are terminal-ish and always win over transit states.
-    Silently ignores unknown phones (status webhooks can arrive for numbers not
-    in our base, e.g. test sends).
-    """
-    if new_state not in _DELIVERY_RANK:
-        return None
-    with _lock:
-        data = _load()
-        lead = data.get(phone)
-        if not lead:
-            return None
-        current = lead.get("delivery", "pendente")
-        if _DELIVERY_RANK.get(new_state, 0) > _DELIVERY_RANK.get(current, 0):
-            lead["delivery"] = new_state
-            _save(data)
-        return lead
+        conn.commit()
+    return imported, skipped
 
 
 def update_lead(phone, **fields):
-    with _lock:
-        data = _load()
-        if phone not in data:
+    _ensure_init()
+    with _conn() as conn:
+        if not conn.execute("SELECT 1 FROM leads WHERE phone=?", (phone,)).fetchone():
             raise KeyError(f"Lead {phone} not found, call get_or_create_lead first")
-        data[phone].update(fields)
-        _save(data)
-        return data[phone]
+        sets, vals = [], []
+        for key, val in fields.items():
+            if key == "signals":
+                sets.append("signals=?"); vals.append(json.dumps(val))
+            elif key in _WRITABLE_COLS:
+                sets.append(f"{key}=?"); vals.append(val)
+        if sets:
+            vals.append(phone)
+            conn.execute(f"UPDATE leads SET {', '.join(sets)} WHERE phone=?", vals)
+            conn.commit()
+        row = conn.execute("SELECT * FROM leads WHERE phone=?", (phone,)).fetchone()
+        return _row_to_lead(conn, row)
 
 
 def append_history(phone, role, text):
-    with _lock:
-        data = _load()
-        lead = data[phone]
-        lead["history"].append({"role": role, "text": text})
-        _save(data)
-        return lead
+    _ensure_init()
+    with _conn() as conn:
+        conn.execute("INSERT INTO history(phone,role,text) VALUES(?,?,?)", (phone, role, text))
+        conn.commit()
+        row = conn.execute("SELECT * FROM leads WHERE phone=?", (phone,)).fetchone()
+        return _row_to_lead(conn, row) if row else None
 
 
 def set_stage(phone, stage):
@@ -149,28 +220,53 @@ def set_stage(phone, stage):
     return update_lead(phone, stage=stage)
 
 
+def advance_delivery(phone, new_state):
+    if new_state not in _DELIVERY_RANK:
+        return None
+    _ensure_init()
+    with _conn() as conn:
+        row = conn.execute("SELECT delivery FROM leads WHERE phone=?", (phone,)).fetchone()
+        if not row:
+            return None
+        current = row["delivery"] or "pendente"
+        if _DELIVERY_RANK.get(new_state, 0) > _DELIVERY_RANK.get(current, 0):
+            conn.execute("UPDATE leads SET delivery=? WHERE phone=?", (new_state, phone))
+            conn.commit()
+        full = conn.execute("SELECT * FROM leads WHERE phone=?", (phone,)).fetchone()
+        return _row_to_lead(conn, full)
+
+
 def all_leads():
-    with _lock:
-        return list(_load().values())
+    # History omitted here for efficiency (the contacts table and the sender
+    # don't need it); use get_lead / hot_leads when the conversation is needed.
+    _ensure_init()
+    with _conn() as conn:
+        rows = conn.execute("SELECT * FROM leads ORDER BY nome").fetchall()
+        return [_row_to_lead(conn, r, with_history=False) for r in rows]
 
 
 def funnel_counts():
-    leads = all_leads()
-    counts = {stage: 0 for stage in STAGES}
-    for lead in leads:
-        counts[lead["stage"]] = counts.get(lead["stage"], 0) + 1
-    counts["total"] = len(leads)
+    _ensure_init()
+    counts = {s: 0 for s in STAGES}
+    with _conn() as conn:
+        for r in conn.execute("SELECT stage, COUNT(*) AS c FROM leads GROUP BY stage"):
+            counts[r["stage"]] = r["c"]
+        total = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+    counts["total"] = total
     return counts
 
 
 def delivery_counts():
-    leads = all_leads()
+    _ensure_init()
     counts = {s: 0 for s in DELIVERY_STATES}
-    for lead in leads:
-        d = lead.get("delivery", "pendente")
-        counts[d] = counts.get(d, 0) + 1
+    with _conn() as conn:
+        for r in conn.execute("SELECT delivery, COUNT(*) AS c FROM leads GROUP BY delivery"):
+            counts[r["delivery"]] = counts.get(r["delivery"], 0) + r["c"]
     return counts
 
 
 def hot_leads():
-    return [l for l in all_leads() if l["stage"] == "quente"]
+    _ensure_init()
+    with _conn() as conn:
+        rows = conn.execute("SELECT * FROM leads WHERE stage='quente' ORDER BY nome").fetchall()
+        return [_row_to_lead(conn, r) for r in rows]

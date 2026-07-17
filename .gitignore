@@ -1,6 +1,10 @@
 __pycache__/
 *.pyc
 leads*.json
+leads.db
+leads.db-wal
+leads.db-shm
+leads*.json.migrated
 history*.json
 .env
 *.env
