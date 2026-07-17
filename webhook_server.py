@@ -490,6 +490,8 @@ _SHARED_CSS = """<style>
   .btn-primary:hover:not(:disabled) { filter: brightness(1.07); box-shadow: var(--shadow-lg); }
   .btn-ghost { background: transparent; color: var(--text-secondary); }
   .btn-ghost:hover { background: var(--page); color: var(--text-primary); }
+  .form-actions { display: flex; justify-content: flex-end; margin-top: 20px; }
+  .form-actions .btn { margin-right: 0; }
   .alert { padding: 12px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 14px; }
   .alert-good { color: var(--status-good); background: var(--status-good-bg); }
   .alert-bad { color: var(--status-bad); background: var(--status-bad-bg); }
@@ -759,7 +761,9 @@ def _render_import_form(erro=None):
           <button type="button" class="file-remove" onclick="cancelUpload()" title="Cancelar">&times;</button>
         </div>
         <div id="file-error" class="alert alert-bad" hidden></div>
-        <button id="submit-btn" class="btn btn-primary" type="submit" disabled>Analisar planilha</button>
+        <div class="form-actions">
+          <button id="submit-btn" class="btn btn-primary" type="submit" disabled>Analisar planilha</button>
+        </div>
       </form>
     </div>
   </section>
