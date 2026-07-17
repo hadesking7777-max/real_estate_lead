@@ -198,14 +198,105 @@ def _e(x):
 
 _SEARCH_JS = """
 <script>
-function filterRows(q) {
-  q = (q || '').toLowerCase().trim();
-  var rows = document.querySelectorAll('#contacts-body tr');
-  rows.forEach(function (r) {
+(function () {
+  var PAGE_SIZE = 25;
+  var page = 1;
+  var query = '';
+
+  function allRows() {
+    return Array.prototype.slice.call(document.querySelectorAll('#contacts-body tr'));
+  }
+  function matches(r) {
     var hay = r.getAttribute('data-search') || '';
-    r.style.display = (!q || hay.indexOf(q) !== -1) ? '' : 'none';
+    return !query || hay.indexOf(query) !== -1;
+  }
+  function render() {
+    var rows = allRows();
+    var visible = rows.filter(matches);
+    var totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
+    if (page > totalPages) page = totalPages;
+    if (page < 1) page = 1;
+    var start = (page - 1) * PAGE_SIZE;
+    var end = start + PAGE_SIZE;
+    var shown = 0;
+    rows.forEach(function (r) { r.style.display = 'none'; });
+    visible.forEach(function (r, i) {
+      if (i >= start && i < end) { r.style.display = ''; shown++; }
+    });
+    var info = document.getElementById('pager-info');
+    if (info) info.textContent = 'Pagina ' + page + ' de ' + totalPages + ' \\u00b7 ' + visible.length + ' contatos';
+    var prev = document.getElementById('pager-prev');
+    var next = document.getElementById('pager-next');
+    if (prev) prev.disabled = (page <= 1);
+    if (next) next.disabled = (page >= totalPages);
+  }
+  window.filterRows = function (q) { query = (q || '').toLowerCase().trim(); page = 1; render(); };
+  window.pagerPrev = function () { if (page > 1) { page--; render(); } };
+  window.pagerNext = function () { page++; render(); };
+  render();
+})();
+</script>
+"""
+
+_IMPORT_JS = """
+<script>
+(function () {
+  var input = document.getElementById('file-input');
+  var dz = document.getElementById('dropzone');
+  var card = document.getElementById('file-card');
+  var nameEl = document.getElementById('file-name');
+  var sizeEl = document.getElementById('file-size');
+  var errEl = document.getElementById('file-error');
+  var submit = document.getElementById('submit-btn');
+  var form = document.getElementById('import-form');
+  if (!input) return;
+
+  function fmtSize(b) {
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+    return (b / 1048576).toFixed(1) + ' MB';
+  }
+  function showError(msg) {
+    errEl.textContent = msg; errEl.hidden = false;
+    card.hidden = true; submit.disabled = true;
+  }
+  function showFile(f) {
+    errEl.hidden = true;
+    nameEl.textContent = f.name;
+    sizeEl.textContent = fmtSize(f.size);
+    card.hidden = false;
+    submit.disabled = false;
+  }
+  function handle(files) {
+    if (!files || !files.length) return;
+    var f = files[0];
+    if (!f.name.toLowerCase().endsWith('.xlsx')) {
+      showError('Esse arquivo nao e .xlsx. Envie uma planilha do Excel.');
+      input.value = '';
+      return;
+    }
+    showFile(f);
+  }
+  window.clearFile = function () {
+    input.value = ''; card.hidden = true; submit.disabled = true; errEl.hidden = true;
+  };
+  input.addEventListener('change', function () { handle(input.files); });
+  ['dragenter', 'dragover'].forEach(function (ev) {
+    dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.add('drag'); });
   });
-}
+  ['dragleave', 'drop'].forEach(function (ev) {
+    dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.remove('drag'); });
+  });
+  dz.addEventListener('drop', function (e) {
+    var dt = e.dataTransfer;
+    if (dt && dt.files && dt.files.length) { input.files = dt.files; handle(dt.files); }
+  });
+  form.addEventListener('submit', function () {
+    submit.disabled = true;
+    submit.textContent = 'Analisando';
+    submit.classList.add('loading');
+  });
+})();
 </script>
 """
 
@@ -322,6 +413,31 @@ _SHARED_CSS = """<style>
   .alert-bad { color: var(--status-bad); background: var(--status-bad-bg); }
   .empty-state { color: var(--text-muted); font-size: 13px; padding: 20px; text-align: center;
                  border: 1px dashed var(--border); border-radius: 10px; }
+  .pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 14px; }
+  .pager-info { font-size: 13px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+  .pager .btn { margin: 0; }
+  button.btn:disabled { opacity: 0.4; cursor: default; }
+
+  .dropzone { border: 2px dashed var(--border); border-radius: 12px; padding: 34px 20px; text-align: center;
+              cursor: pointer; transition: border-color .15s, background .15s; background: var(--page);
+              color: var(--text-muted); }
+  .dropzone:hover, .dropzone.drag { border-color: var(--accent); background: var(--status-info-bg); color: var(--accent); }
+  .dz-icon { line-height: 1; margin-bottom: 10px; }
+  .dz-title { font-size: 14px; color: var(--text-primary); font-weight: 600; }
+  .dz-hint { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+  .file-card { display: flex; align-items: center; gap: 12px; margin-top: 14px; padding: 12px 14px;
+               border: 1px solid var(--status-good); background: var(--status-good-bg); border-radius: 10px; }
+  .file-check { color: var(--status-good); font-weight: 700; font-size: 16px; }
+  .file-meta { flex: 1; min-width: 0; }
+  .file-name { font-size: 13px; font-weight: 600; color: var(--text-primary);
+               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-size { font-size: 12px; color: var(--text-muted); }
+  .file-remove { background: transparent; border: none; color: var(--text-muted); font-size: 20px;
+                 cursor: pointer; line-height: 1; padding: 0 4px; }
+  .btn.loading::after { content: ''; display: inline-block; width: 12px; height: 12px; margin-left: 8px;
+    border: 2px solid rgba(255,255,255,0.5); border-top-color: #fff; border-radius: 50%;
+    vertical-align: middle; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
   @media (max-width: 520px) {
     .signals { grid-template-columns: 1fr; }
@@ -454,7 +570,12 @@ def _render_panel_html():
         <div class="table-wrap"><table>
           <thead><tr><th>Nome</th><th>Telefone</th><th>Perfil</th><th>Origem</th><th>Etapa</th><th>Entrega</th></tr></thead>
           <tbody id="contacts-body">{table_rows}</tbody>
-        </table></div>"""
+        </table></div>
+        <div class="pager">
+          <button class="btn btn-ghost" id="pager-prev" onclick="pagerPrev()">Anterior</button>
+          <span id="pager-info" class="pager-info"></span>
+          <button class="btn btn-ghost" id="pager-next" onclick="pagerNext()">Proximo</button>
+        </div>"""
 
     body = f"""
   <section><div class="tiles">{kpi_tiles}</div></section>
@@ -468,6 +589,14 @@ def _render_panel_html():
     return _page("Painel Guerra Cyrela", "Painel do piloto de reativacao", "painel", body)
 
 
+_UPLOAD_ICON = (
+    '<svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" '
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
+    '<polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>'
+)
+
+
 def _render_import_form(erro=None):
     alert = f'<div class="alert alert-bad">{_e(erro)}</div>' if erro else ""
     body = f"""
@@ -477,12 +606,26 @@ def _render_import_form(erro=None):
     <div class="panel-box">
       <p class="muted-text">Envie a planilha (.xlsx) com as colunas nome, telefone e email.
       A gente analisa, remove duplicados e mostra um resumo antes de importar de verdade.</p>
-      <form method="post" action="/importar/analisar" enctype="multipart/form-data">
-        <input class="file-input" type="file" name="arquivo" accept=".xlsx" required>
-        <button class="btn btn-primary" type="submit">Analisar planilha</button>
+      <form id="import-form" method="post" action="/importar/analisar" enctype="multipart/form-data">
+        <input id="file-input" type="file" name="arquivo" accept=".xlsx" hidden>
+        <div id="dropzone" class="dropzone" onclick="document.getElementById('file-input').click()">
+          <div class="dz-icon">{_UPLOAD_ICON}</div>
+          <div class="dz-title">Arraste a planilha aqui ou clique para selecionar</div>
+          <div class="dz-hint">Apenas arquivos .xlsx</div>
+        </div>
+        <div id="file-card" class="file-card" hidden>
+          <span class="file-check">&#10003;</span>
+          <div class="file-meta">
+            <div id="file-name" class="file-name"></div>
+            <div id="file-size" class="file-size"></div>
+          </div>
+          <button type="button" class="file-remove" onclick="clearFile()" title="Remover">&times;</button>
+        </div>
+        <div id="file-error" class="alert alert-bad" hidden></div>
+        <button id="submit-btn" class="btn btn-primary" type="submit" disabled>Analisar planilha</button>
       </form>
     </div>
-  </section>"""
+  </section>""" + _IMPORT_JS
     return _page("Importar base", "Importacao de contatos", "importar", body)
 
 
