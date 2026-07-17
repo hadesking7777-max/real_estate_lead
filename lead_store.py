@@ -361,6 +361,22 @@ def count_ok_sends_between(ts_from, ts_to):
         return r["c"]
 
 
+def _sp_day_floor(ts):
+    shifted = ts - 3 * 3600  # Sao Paulo UTC-3
+    return (shifted - (shifted % 86400)) + 3 * 3600
+
+
+def sends_by_day():
+    """[(sp_day_start_ts, ok_count), ...] ascending, for the daily-sends chart."""
+    _ensure_init()
+    buckets = {}
+    with _conn() as conn:
+        for r in conn.execute("SELECT ts FROM sends WHERE ok=1"):
+            day = _sp_day_floor(r["ts"])
+            buckets[day] = buckets.get(day, 0) + 1
+    return sorted(buckets.items())
+
+
 def next_pending_opener():
     _ensure_init()
     with _conn() as conn:

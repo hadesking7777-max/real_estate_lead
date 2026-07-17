@@ -143,6 +143,12 @@ def painel():
     return _render_panel_html()
 
 
+@app.route("/resultados")
+@_requires_auth
+def resultados():
+    return _render_resultados()
+
+
 @app.route("/importar", methods=["GET"])
 @_requires_auth
 def importar():
@@ -492,6 +498,16 @@ _SHARED_CSS = """<style>
   .tile-good .tile-num { color: var(--status-good); }
   .tile-warning .tile-num { color: var(--status-warning); }
   .tile-muted .tile-num { color: var(--text-muted); }
+  .tile-sub { font-size: 11px; color: var(--text-muted); margin-top: 3px; font-variant-numeric: tabular-nums; }
+
+  .colchart-wrap { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
+                   padding: 20px 22px; box-shadow: var(--shadow); overflow-x: auto; }
+  .colchart { display: flex; align-items: flex-end; gap: 16px; height: 180px; min-width: min-content; }
+  .col { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; gap: 6px; flex: 0 0 auto; }
+  .col-bar { width: 26px; background: var(--accent); border-radius: 4px 4px 0 0; min-height: 4px;
+             transition: height .5s cubic-bezier(.4,0,.2,1); }
+  .col-val { font-size: 12px; font-weight: 600; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+  .col-x { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
 
   .funnel { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; box-shadow: var(--shadow); }
   .funnel-row { display: grid; grid-template-columns: 130px 1fr 150px; align-items: center; gap: 12px; padding: 8px 0; }
@@ -669,6 +685,11 @@ _NAV_ICON_IMPORT = (
     '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
     '<polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>'
 )
+_NAV_ICON_RESULTS = (
+    '<svg class="nav-ic" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" '
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/></svg>'
+)
 
 
 def _nav(active):
@@ -677,6 +698,7 @@ def _nav(active):
         return f'<a class="{cls}" href="{href}">{icon}{label}</a>'
     return ('<nav class="nav"><div class="nav-inner">'
             + item("/painel", "Funil e contatos", "painel", _NAV_ICON_FUNNEL)
+            + item("/resultados", "Resultados", "resultados", _NAV_ICON_RESULTS)
             + item("/importar", "Importar base", "importar", _NAV_ICON_IMPORT)
             + "</div></nav>")
 
@@ -843,6 +865,52 @@ def _render_contact(lead):
     <div class="timeline">{_timeline_html(lead)}</div>
   </section>"""
     return _page(lead["nome"] or phone, "Detalhe do contato", "painel", body)
+
+
+def _fmt_day(day_ts):
+    return (datetime.utcfromtimestamp(day_ts) - timedelta(hours=3)).strftime("%d/%m")
+
+
+def _daily_sends_chart():
+    data = lead_store.sends_by_day()
+    if not data:
+        return ('<div class="empty-state">Nenhum envio ainda. O grafico aparece aqui '
+                'quando a campanha comecar a enviar.</div>')
+    maxv = max(v for _, v in data) or 1
+    cols = ""
+    for day_ts, v in data:
+        h = max(4, round(v / maxv * 100))
+        cols += (f'<div class="col"><span class="col-val">{v}</span>'
+                 f'<div class="col-bar" style="height:{h}%"></div>'
+                 f'<span class="col-x">{_fmt_day(day_ts)}</span></div>')
+    return f'<div class="colchart-wrap"><div class="colchart">{cols}</div></div>'
+
+
+def _render_resultados():
+    dc = lead_store.delivery_counts()
+    fc = lead_store.funnel_counts()
+    sent = dc["enviado"] + dc["entregue"] + dc["lido"] + dc["respondeu"]
+    delivered = dc["entregue"] + dc["lido"] + dc["respondeu"]
+    read = dc["lido"] + dc["respondeu"]
+    responded = dc["respondeu"]
+    quente = fc.get("quente", 0)
+
+    vol_tiles = "".join(
+        f'<div class="tile"><div class="tile-num">{n}</div><div class="tile-label">{lbl}</div></div>'
+        for n, lbl in [(sent, "Enviados"), (delivered, "Entregues"), (read, "Lidos"),
+                       (responded, "Respostas"), (quente, "Leads quentes")]
+    )
+    rate_tiles = "".join(
+        f'<div class="tile"><div class="tile-num">{_fmt_pct(n, d)}</div>'
+        f'<div class="tile-label">{lbl}</div><div class="tile-sub">{n} de {d}</div></div>'
+        for n, d, lbl in [(delivered, sent, "Taxa de entrega"), (read, sent, "Taxa de leitura"),
+                          (responded, sent, "Taxa de resposta"), (quente, responded, "Taxa de qualificacao")]
+    )
+    body = f"""
+  <section><h2>Volume</h2><div class="tiles">{vol_tiles}</div></section>
+  <section><h2>Taxas de conversao</h2><div class="tiles">{rate_tiles}</div></section>
+  <section><h2>Envios por dia</h2>{_daily_sends_chart()}</section>"""
+    return _page("Resultados", "Metricas da campanha", "resultados", body)
 
 
 def _render_campaign():
