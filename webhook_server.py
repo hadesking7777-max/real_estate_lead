@@ -27,6 +27,7 @@ from datetime import datetime, timedelta
 from functools import wraps
 
 from flask import Flask, request, jsonify, redirect, session
+from werkzeug.security import generate_password_hash, check_password_hash
 
 import lead_store
 import qualification
@@ -76,7 +77,12 @@ DELIVERY_LABELS = {
 
 
 def _creds_ok(user, pw):
-    return user == PANEL_USER and pw == PANEL_PASSWORD
+    if user != PANEL_USER:
+        return False
+    stored = lead_store.get_setting("panel_password_hash")
+    if stored:
+        return check_password_hash(stored, pw)
+    return pw == PANEL_PASSWORD
 
 
 def _requires_auth(f):
@@ -119,6 +125,22 @@ def login_post():
 def logout():
     session.clear()
     return redirect("/login")
+
+
+@app.route("/conta/senha", methods=["POST"])
+@_requires_auth
+def conta_senha():
+    atual = request.form.get("atual", "")
+    nova = request.form.get("nova", "")
+    confirma = request.form.get("confirma", "")
+    if not _creds_ok(PANEL_USER, atual):
+        return redirect("/painel?conta=atual")
+    if len(nova) < 6:
+        return redirect("/painel?conta=curta")
+    if nova != confirma:
+        return redirect("/painel?conta=match")
+    lead_store.set_setting("panel_password_hash", generate_password_hash(nova))
+    return redirect("/painel?conta=ok")
 
 
 @app.route("/webhook", methods=["GET"])
@@ -217,17 +239,22 @@ def importar_analisar():
     return _render_import_review(token, analysis)
 
 
-@app.route("/campanha/iniciar", methods=["POST"])
+@app.route("/campanha/enviar", methods=["POST"])
 @_requires_auth
-def campanha_iniciar():
-    scheduler.start_campaign()
+def campanha_enviar():
+    try:
+        qty = int(request.form.get("quantidade", "0"))
+    except ValueError:
+        qty = 0
+    if qty > 0:
+        scheduler.queue_manual(qty)
     return redirect("/painel")
 
 
-@app.route("/campanha/pausar", methods=["POST"])
+@app.route("/campanha/parar", methods=["POST"])
 @_requires_auth
-def campanha_pausar():
-    scheduler.pause_campaign()
+def campanha_parar():
+    scheduler.stop_manual()
     return redirect("/painel")
 
 
@@ -323,16 +350,54 @@ def _e(x):
     return html.escape(str(x if x is not None else ""))
 
 
+def _info_btn(key):
+    return f'<button class="info-btn" type="button" onclick="showState(\'{key}\')" title="O que significa?">?</button>'
+
+
+_INFO_MODAL_HTML = """
+  <div id="state-modal" class="modal-overlay" hidden onclick="if(event.target===this)hideState()">
+    <div class="modal-card">
+      <div class="modal-head"><span id="modal-title" class="modal-title"></span>
+        <button class="modal-close" type="button" onclick="hideState()">&times;</button></div>
+      <p id="modal-text" class="modal-text"></p>
+    </div>
+  </div>"""
+
+
 _BOARD_JS = """
 <script>
 window.filterRows = function (q) {
   q = (q || '').toLowerCase().trim();
-  var cards = document.querySelectorAll('.kanban-card');
-  cards.forEach(function (c) {
+  document.querySelectorAll('.kanban-card').forEach(function (c) {
     var hay = c.getAttribute('data-search') || '';
     c.style.display = (!q || hay.indexOf(q) !== -1) ? '' : 'none';
   });
 };
+var STATE_INFO = {
+  campanha: {t: 'Campanha', d: 'Controle manual do envio. Voce escolhe quantos contatos disparar agora e clica em Enviar agora. Pode repetir quantas vezes quiser. Os envios saem espacados automaticamente para proteger o numero.'},
+  pendente: {t: 'Pendentes', d: 'Contatos que ainda nao receberam nenhuma mensagem. Estao na fila para o primeiro contato quando a campanha rodar.'},
+  contatado: {t: 'Contatados', d: 'Ja receberam a mensagem de abertura, mas ainda nao responderam. Aguardando resposta, ou entrando na cadencia de follow-up.'},
+  respondeu: {t: 'Responderam', d: 'Responderam a primeira mensagem. A IA comeca a qualificacao a partir daqui.'},
+  qualificando: {t: 'Em qualificacao', d: 'Estao conversando com a IA agora, que mede intencao, capital, forma de pagamento e timing.'},
+  quente: {t: 'Quentes', d: 'Leads qualificados, com alta intencao de compra. Ja entregues no seu WhatsApp para fechar.'},
+  morno: {t: 'Morno', d: 'Tem interesse, mas com horizonte mais longo ou capital ainda indefinido. Ficam sendo nutridos pela IA.'},
+  frio: {t: 'Frio', d: 'Sem interesse real no momento. Saem do fluxo ativo da campanha.'},
+  opt_out: {t: 'Opt-out', d: 'Pediram para nao receber mais mensagens. Removidos na hora e nunca mais contatados.'},
+  taxa_entrega: {t: 'Taxa de entrega', d: 'Percentual das mensagens enviadas que chegaram no aparelho do contato. Mede a qualidade da base e a saude do numero.'},
+  taxa_leitura: {t: 'Taxa de leitura', d: 'Percentual das mensagens enviadas que foram lidas (abertas) pelo contato.'},
+  taxa_resposta: {t: 'Taxa de resposta', d: 'Percentual das mensagens enviadas que geraram uma resposta. E a principal metrica de reativacao.'},
+  taxa_qualificacao: {t: 'Taxa de qualificacao', d: 'Dos que responderam, quantos viraram leads quentes (investidores prontos para fechar).'}
+};
+window.showState = function (k) {
+  var info = STATE_INFO[k]; if (!info) return;
+  document.getElementById('modal-title').textContent = info.t;
+  document.getElementById('modal-text').textContent = info.d;
+  document.getElementById('state-modal').hidden = false;
+};
+window.hideState = function () {
+  var m = document.getElementById('state-modal'); if (m) m.hidden = true;
+};
+document.addEventListener('keydown', function (e) { if (e.key === 'Escape') window.hideState(); });
 </script>
 """
 
@@ -621,6 +686,11 @@ _SHARED_CSS = """<style>
   .campaign-metrics { font-size: 13px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
   .campaign-box form { margin: 0; }
   .campaign-box .btn { margin-right: 0; }
+  .send-form { display: flex; align-items: center; gap: 8px; }
+  .qty-input { width: 84px; padding: 10px 12px; border-radius: 9px; border: 1px solid var(--border);
+               background: var(--page); color: var(--text-primary); font-size: 14px; text-align: center;
+               font-variant-numeric: tabular-nums; }
+  .qty-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--status-info-bg); }
 
   .contact-link { color: var(--accent); text-decoration: none; font-weight: 600; }
   .contact-link:hover { text-decoration: underline; }
@@ -686,6 +756,46 @@ _SHARED_CSS = """<style>
   .kanban-phone { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; margin-top: 4px; }
   .kanban-foot { margin-top: 8px; }
   .board-empty { color: var(--text-muted); font-size: 12px; text-align: center; padding: 16px 8px; }
+
+  .info-btn { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--border);
+              background: transparent; color: var(--text-muted); font-size: 10px; font-weight: 700;
+              cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+              line-height: 1; margin-left: 6px; vertical-align: middle; padding: 0;
+              transition: color .12s ease, border-color .12s ease; }
+  .info-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: flex; align-items: center;
+                   justify-content: center; padding: 20px; z-index: 100; animation: fadein .15s ease; }
+  .modal-card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px;
+                padding: 22px 24px; max-width: 400px; width: 100%; box-shadow: var(--shadow-lg); animation: pop .16s ease; }
+  .modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+  .modal-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--accent); }
+  .modal-close { background: transparent; border: none; color: var(--text-muted); font-size: 22px;
+                 cursor: pointer; line-height: 1; padding: 0; }
+  .modal-close:hover { color: var(--text-primary); }
+  .modal-text { font-size: 14px; color: var(--text-secondary); line-height: 1.55; margin: 0; }
+  .modal-label { display: block; text-align: left; font-size: 12px; color: var(--text-secondary);
+                 font-weight: 600; margin: 12px 0 6px; }
+  .modal-input { width: 100%; padding: 10px 12px; border-radius: 9px; border: 1px solid var(--border);
+                 background: var(--page); color: var(--text-primary); font-size: 14px; }
+  .modal-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--status-info-bg); }
+  @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes pop { from { opacity: 0; transform: translateY(6px) scale(0.98); } to { opacity: 1; transform: none; } }
+
+  .account { position: relative; }
+  .account-btn { display: inline-flex; align-items: center; gap: 8px; background: transparent; border: none;
+                 color: var(--text-secondary); font-size: 13px; cursor: pointer; padding: 10px 4px; }
+  .account-btn:hover { color: var(--text-primary); }
+  .account-avatar { width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: #fff;
+                    display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
+  .account-name { font-weight: 600; }
+  .account-caret { font-size: 10px; color: var(--text-muted); }
+  .account-menu { position: absolute; right: 0; top: calc(100% + 4px); background: var(--surface-1);
+                  border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-lg);
+                  min-width: 170px; padding: 6px; z-index: 50; }
+  .account-item { display: block; width: 100%; text-align: left; background: transparent; border: none;
+                  color: var(--text-primary); font-size: 13px; padding: 9px 10px; border-radius: 7px;
+                  cursor: pointer; text-decoration: none; }
+  .account-item:hover { background: var(--page); }
   .pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 14px; }
   .pager-info { font-size: 13px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
   .pager .btn { margin: 0; }
@@ -759,12 +869,54 @@ def _nav(active):
     def item(href, label, key, icon):
         cls = "nav-item active" if key == active else "nav-item"
         return f'<a class="{cls}" href="{href}">{icon}{label}</a>'
+    initials = (PANEL_USER[:2] or "U").upper()
+    account = (
+        '<div class="account">'
+        '<button class="account-btn" type="button" onclick="toggleAccount(event)">'
+        f'<span class="account-avatar">{_e(initials)}</span>'
+        f'<span class="account-name">{_e(PANEL_USER)}</span>'
+        '<span class="account-caret">&#9662;</span></button>'
+        '<div class="account-menu" id="account-menu" hidden>'
+        '<button class="account-item" type="button" onclick="openPwd()">Trocar senha</button>'
+        '<a class="account-item" href="/logout">Sair</a>'
+        '</div></div>'
+    )
     return ('<nav class="nav"><div class="nav-inner">'
             + item("/painel", "Painel", "painel", _NAV_ICON_FUNNEL)
             + item("/importar", "Importar base", "importar", _NAV_ICON_IMPORT)
             + '<span class="nav-spacer"></span>'
-            + '<a class="nav-item nav-logout" href="/logout">Sair</a>'
+            + account
             + "</div></nav>")
+
+
+_ACCOUNT_HTML = """
+  <div id="pwd-modal" class="modal-overlay" hidden onclick="if(event.target===this)closePwd()">
+    <div class="modal-card">
+      <div class="modal-head"><span class="modal-title">Trocar senha</span>
+        <button class="modal-close" type="button" onclick="closePwd()">&times;</button></div>
+      <form method="post" action="/conta/senha">
+        <label class="modal-label">Senha atual</label>
+        <input class="modal-input" type="password" name="atual" required autocomplete="current-password">
+        <label class="modal-label">Nova senha (minimo 6 caracteres)</label>
+        <input class="modal-input" type="password" name="nova" required minlength="6" autocomplete="new-password">
+        <label class="modal-label">Confirmar nova senha</label>
+        <input class="modal-input" type="password" name="confirma" required minlength="6" autocomplete="new-password">
+        <div class="form-actions"><button class="btn btn-primary" type="submit">Salvar</button></div>
+      </form>
+    </div>
+  </div>
+<script>
+window.toggleAccount = function (e) { if (e) e.stopPropagation();
+  var m = document.getElementById('account-menu'); if (m) m.hidden = !m.hidden; };
+document.addEventListener('click', function () {
+  var m = document.getElementById('account-menu'); if (m) m.hidden = true; });
+window.openPwd = function () {
+  var p = document.getElementById('pwd-modal'); if (p) p.hidden = false;
+  var m = document.getElementById('account-menu'); if (m) m.hidden = true; };
+window.closePwd = function () {
+  var p = document.getElementById('pwd-modal'); if (p) p.hidden = true; };
+document.addEventListener('keydown', function (e) { if (e.key === 'Escape') window.closePwd(); });
+</script>"""
 
 
 def _render_login(error=None, next_url="/painel"):
@@ -804,6 +956,7 @@ def _page(title, subtitle, active, body):
         f'<p>{_e(subtitle)}</p></div></div></header>'
         + _nav(active)
         + f"<main>{body}</main>"
+        + _ACCOUNT_HTML
         + "</body></html>"
     )
 
@@ -976,34 +1129,41 @@ def _daily_sends_chart():
 
 def _render_campaign():
     s = scheduler.status_summary()
-    status = s["status"]
-    label = {"idle": "Parada", "running": "Rodando", "paused": "Pausada"}.get(status, status)
-    chip = {"idle": "chip-muted", "running": "chip-good", "paused": "chip-info"}.get(status, "chip-muted")
-    if status == "running":
-        action, btn_label, btn_cls = "/campanha/pausar", "Pausar", "btn-ghost"
+    sending = s["status"] == "running" and s["remaining"] > 0
+    if sending:
+        chip, label = "chip-good", f"Enviando &middot; faltam {s['remaining']}"
+    elif s["status"] == "paused":
+        chip, label = "chip-info", "Pausada"
     else:
-        action = "/campanha/iniciar"
-        btn_label = "Retomar" if status == "paused" else "Iniciar campanha"
-        btn_cls = "btn-primary"
+        chip, label = "chip-muted", "Parada"
     warn = ""
-    if status == "paused" and s["fail_streak"] >= scheduler.MAX_FAIL_STREAK:
-        warn = ('<div class="alert alert-bad">Campanha pausada automaticamente apos varias falhas de '
-                'envio. Confirme se os modelos ja foram aprovados na Meta antes de retomar.</div>')
-    metrics = (
-        f'Dia {s["day"]} &middot; Enviados hoje {s["sent_today"]}/{s["target"]} '
-        f'&middot; Total enviados {s["total_enviados"]} &middot; Pendentes {s["pendentes"]}'
-        if s["day"] else "Ainda nao iniciada"
-    )
+    if s["status"] == "paused" and s["fail_streak"] >= scheduler.MAX_FAIL_STREAK:
+        warn = ('<div class="alert alert-bad">Envio pausado automaticamente apos varias falhas seguidas. '
+                'Confirme os modelos aprovados e o token antes de enviar de novo.</div>')
+    metrics = (f'Total enviados {s["total_enviados"]} &middot; Pendentes {s["pendentes"]}')
+    # while sending, show a stop button; otherwise the manual "send N" form
+    if sending:
+        control = ('<form method="post" action="/campanha/parar">'
+                   '<button class="btn btn-ghost" type="submit">Parar envio</button></form>')
+    else:
+        maxq = max(s["pendentes"], 1)
+        default_q = min(20, maxq)
+        control = (
+            '<form method="post" action="/campanha/enviar" class="send-form">'
+            f'<input class="qty-input" type="number" name="quantidade" min="1" max="{maxq}" '
+            f'value="{default_q}" title="Quantos contatos enviar agora">'
+            '<button class="btn btn-primary" type="submit">Enviar agora</button>'
+            '</form>')
     return f"""
   <section>
-    <h2>Campanha</h2>
+    <h2>Campanha{_info_btn('campanha')}</h2>
     {warn}
     <div class="campaign-box">
       <div class="campaign-info">
         <span class="chip {chip}">{label}</span>
         <span class="campaign-metrics">{metrics}</span>
       </div>
-      <form method="post" action="{action}"><button class="btn {btn_cls}" type="submit">{btn_label}</button></form>
+      {control}
     </div>
   </section>"""
 
@@ -1025,7 +1185,7 @@ def _render_panel_html():
         conv = f" &middot; {_fmt_pct(c, prev_count)} da etapa anterior" if i > 0 else ""
         funnel_rows += f"""
         <div class="funnel-row">
-          <div class="funnel-label">{label}</div>
+          <div class="funnel-label">{label}{_info_btn(key)}</div>
           <div class="funnel-track"><div class="funnel-bar" style="width:{max(width_pct, 2):.1f}%; background:{color}"></div></div>
           <div class="funnel-value">{c} <span class="funnel-pct">({_fmt_pct(c, total)}{conv})</span></div>
         </div>"""
@@ -1039,9 +1199,12 @@ def _render_panel_html():
     quente_n = counts.get("quente", 0)
     rate_tiles = "".join(
         f'<div class="tile"><div class="tile-num">{_fmt_pct(n, d)}</div>'
-        f'<div class="tile-label">{lbl}</div><div class="tile-sub">{n} de {d}</div></div>'
-        for n, d, lbl in [(delivered, sent, "Taxa de entrega"), (read, sent, "Taxa de leitura"),
-                          (responded, sent, "Taxa de resposta"), (quente_n, responded, "Taxa de qualificacao")]
+        f'<div class="tile-label">{lbl}{_info_btn(key)}</div><div class="tile-sub">{n} de {d}</div></div>'
+        for n, d, lbl, key in [
+            (delivered, sent, "Taxa de entrega", "taxa_entrega"),
+            (read, sent, "Taxa de leitura", "taxa_leitura"),
+            (responded, sent, "Taxa de resposta", "taxa_resposta"),
+            (quente_n, responded, "Taxa de qualificacao", "taxa_qualificacao")]
     )
 
     cards = ""
@@ -1098,7 +1261,7 @@ def _render_panel_html():
         inner = "".join(_kanban_card(l) for l in col_leads) or '<div class="board-empty">Vazio</div>'
         cols_html += f"""
         <div class="board-col {cls}">
-          <div class="board-col-head"><span class="board-col-title">{label}</span><span class="board-col-count">{len(col_leads)}</span></div>
+          <div class="board-col-head"><span class="board-col-title">{label}{_info_btn(key)}</span><span class="board-col-count">{len(col_leads)}</span></div>
           <div class="board-col-body">{inner}</div>
         </div>"""
 
@@ -1109,13 +1272,22 @@ def _render_panel_html():
         <input class="search" type="search" placeholder="Buscar por nome, telefone, pais ou tag..." oninput="filterRows(this.value)">
         <div class="board">{cols_html}</div>"""
 
-    body = _render_campaign() + f"""
+    conta_map = {
+        "ok": ("good", "Senha alterada com sucesso."),
+        "atual": ("bad", "Senha atual incorreta."),
+        "curta": ("bad", "A nova senha precisa ter ao menos 6 caracteres."),
+        "match": ("bad", "A nova senha e a confirmacao nao conferem."),
+    }
+    cm = conta_map.get(request.args.get("conta"))
+    toast = f'<div class="alert alert-{cm[0]}">{cm[1]}</div>' if cm else ""
+
+    body = toast + _render_campaign() + f"""
   <section><h2>Funil</h2><div class="funnel">{funnel_rows}</div></section>
   <section><h2>Taxas de conversao</h2><div class="tiles">{rate_tiles}</div></section>
   <section><h2>Envios por dia</h2>{_daily_sends_chart()}</section>
   <section><h2>Leads quentes ({len(hot)})</h2>{cards}</section>
   <section><h2>Contatos por status ({len(leads)})</h2>{board_section}</section>
-  """ + _BOARD_JS
+  """ + _INFO_MODAL_HTML + _BOARD_JS
 
     return _page("Painel Guerra Cyrela", "Painel do piloto de reativacao", "painel", body)
 

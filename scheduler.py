@@ -25,10 +25,10 @@ import send
 # --- config (env-overridable) ---
 RAMP = {1: 20, 2: 30, 3: 45, 4: 60, 5: 80}          # per-day send cap
 MAX_DAILY = int(os.environ.get("MAX_DAILY", "100"))  # cap for day 6 onward
-SEND_GAP_SECONDS = int(os.environ.get("SEND_GAP_SECONDS", "120"))
-FOLLOWUP1_DELAY = int(os.environ.get("FOLLOWUP1_DELAY", str(2 * 86400)))
-FOLLOWUP2_DELAY = int(os.environ.get("FOLLOWUP2_DELAY", str(4 * 86400)))
-TICK_INTERVAL = int(os.environ.get("TICK_INTERVAL", "30"))
+# Manual mode: the operator decides how many to send and when; we keep only a
+# small pacing gap between sends for number safety.
+SEND_GAP_SECONDS = int(os.environ.get("SEND_GAP_SECONDS", "8"))
+TICK_INTERVAL = int(os.environ.get("TICK_INTERVAL", "5"))
 MAX_FAIL_STREAK = int(os.environ.get("MAX_FAIL_STREAK", "5"))
 
 PF_OPENERS = [f"reativacao_pf_faria_lima_v{i}" for i in range(1, 7)]
@@ -91,65 +91,55 @@ def _apply_success(lead, kind, template, resp_text, now):
 
 
 def tick(now=None, sender=None):
-    """Perform at most one send. Returns a summary dict (or None if idle/paused)."""
+    """Send at most one opener while a manual batch is pending. Returns a summary (or None)."""
     now = time.time() if now is None else now
     sender = sender or send.send_template
 
     camp = lead_store.get_campaign()
-    if camp["status"] != "running" or camp["start_ts"] is None:
+    remaining = camp.get("manual_remaining", 0) or 0
+    if camp["status"] != "running" or remaining <= 0:
         return None
 
     last = lead_store.last_send_ts()
     if last is not None and (now - last) < SEND_GAP_SECONDS:
         return {"action": "wait", "reason": "gap"}
 
-    day = current_day(camp["start_ts"], now)
-    target = ramp_target(day)
-    sent_today = lead_store.count_ok_sends_between(_sp_day_start_ts(now), now + 1)
-    if sent_today >= target:
-        return {"action": "wait", "reason": "daily_cap", "sent_today": sent_today, "target": target}
+    lead = lead_store.next_pending_opener()
+    if not lead:  # base exhausted
+        lead_store.set_campaign(manual_remaining=0, status="idle")
+        return {"action": "idle", "reason": "no_pending"}
 
-    fu = lead_store.due_followup(now, FOLLOWUP1_DELAY, FOLLOWUP2_DELAY)
-    if fu:
-        lead, kind = fu
-    else:
-        lead, kind = lead_store.next_pending_opener(), "opener"
-    if not lead:
-        return {"action": "idle", "reason": "nothing_due"}
-
-    template = _pick_template(lead, kind)
+    template = _pick_template(lead, "opener")
     status, resp = sender(lead["phone"], template, _first_name(lead.get("nome")))
     ok = status in (200, 201)
-    lead_store.record_send(lead["phone"], kind, template, now, ok)
+    lead_store.record_send(lead["phone"], "opener", template, now, ok)
 
     if ok:
-        _apply_success(lead, kind, template, resp, now)
-        lead_store.set_campaign(fail_streak=0)
-        return {"action": "sent", "kind": kind, "phone": lead["phone"], "template": template}
+        _apply_success(lead, "opener", template, resp, now)
+        new_remaining = remaining - 1
+        fields = {"fail_streak": 0, "manual_remaining": new_remaining}
+        if new_remaining <= 0:
+            fields["status"] = "idle"
+        lead_store.set_campaign(**fields)
+        return {"action": "sent", "phone": lead["phone"], "template": template, "remaining": new_remaining}
 
     lead_store.advance_delivery(lead["phone"], "falhou")
     streak = (camp["fail_streak"] or 0) + 1
     fields = {"fail_streak": streak}
     if streak >= MAX_FAIL_STREAK:
-        fields["status"] = "paused"
+        fields["status"] = "paused"  # stop after repeated failures (bad token/setup)
     lead_store.set_campaign(**fields)
-    return {"action": "failed", "kind": kind, "phone": lead["phone"], "status": status, "streak": streak}
+    return {"action": "failed", "phone": lead["phone"], "status": status, "streak": streak}
 
 
 def status_summary(now=None):
-    now = time.time() if now is None else now
     camp = lead_store.get_campaign()
     counts = lead_store.funnel_counts()
     total = counts.get("total", 0)
     pendente = counts.get("pendente", 0)
-    day = current_day(camp["start_ts"], now) if camp["start_ts"] else 0
-    sent_today = (lead_store.count_ok_sends_between(_sp_day_start_ts(now), now + 1)
-                  if camp["start_ts"] else 0)
     return {
         "status": camp["status"],
-        "day": day,
-        "target": ramp_target(day) if day else 0,
-        "sent_today": sent_today,
+        "remaining": camp.get("manual_remaining", 0) or 0,
         "total_enviados": total - pendente,
         "pendentes": pendente,
         "fail_streak": camp["fail_streak"] or 0,
@@ -158,15 +148,19 @@ def status_summary(now=None):
 
 # --- controls ---
 
-def start_campaign():
+def queue_manual(n):
+    """Add n openers to the manual send queue (capped at pendentes) and start sending."""
+    n = max(0, int(n or 0))
+    pend = lead_store.funnel_counts().get("pendente", 0)
     camp = lead_store.get_campaign()
-    if camp["status"] == "idle" or camp["start_ts"] is None:
-        return lead_store.set_campaign(status="running", start_ts=time.time(), fail_streak=0)
-    return lead_store.set_campaign(status="running", fail_streak=0)  # resume
+    remaining = min((camp.get("manual_remaining", 0) or 0) + n, pend)
+    status = "running" if remaining > 0 else "idle"
+    return lead_store.set_campaign(manual_remaining=remaining, status=status, fail_streak=0)
 
 
-def pause_campaign():
-    return lead_store.set_campaign(status="paused")
+def stop_manual():
+    """Stop the current batch, clearing whatever is left in the queue."""
+    return lead_store.set_campaign(manual_remaining=0, status="idle")
 
 
 # --- background thread ---

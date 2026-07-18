@@ -57,7 +57,12 @@ CREATE TABLE IF NOT EXISTS campaign (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   status TEXT DEFAULT 'idle',
   start_ts REAL,
-  fail_streak INTEGER DEFAULT 0
+  fail_streak INTEGER DEFAULT 0,
+  manual_remaining INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT
 );
 CREATE TABLE IF NOT EXISTS sends (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,6 +126,9 @@ def _migrate_schema(conn):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(leads)")}
     if "last_send_ts" not in cols:
         conn.execute("ALTER TABLE leads ADD COLUMN last_send_ts REAL")
+    camp_cols = {r["name"] for r in conn.execute("PRAGMA table_info(campaign)")}
+    if "manual_remaining" not in camp_cols:
+        conn.execute("ALTER TABLE campaign ADD COLUMN manual_remaining INTEGER DEFAULT 0")
     # guarantee the single campaign row exists
     conn.execute("INSERT OR IGNORE INTO campaign(id, status, fail_streak) VALUES(1, 'idle', 0)")
     conn.commit()
@@ -316,15 +324,33 @@ def hot_leads():
 
 # ---------- campaign state + send log (used by the automation scheduler) ----------
 
+def get_setting(key, default=None):
+    _ensure_init()
+    with _conn() as conn:
+        r = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return r["value"] if r else default
+
+
+def set_setting(key, value):
+    _ensure_init()
+    with _conn() as conn:
+        conn.execute("INSERT INTO settings(key, value) VALUES(?,?) "
+                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+        conn.commit()
+
+
 def get_campaign():
     _ensure_init()
     with _conn() as conn:
-        r = conn.execute("SELECT status, start_ts, fail_streak FROM campaign WHERE id=1").fetchone()
-        return {"status": r["status"], "start_ts": r["start_ts"], "fail_streak": r["fail_streak"]}
+        r = conn.execute(
+            "SELECT status, start_ts, fail_streak, manual_remaining FROM campaign WHERE id=1"
+        ).fetchone()
+        return {"status": r["status"], "start_ts": r["start_ts"], "fail_streak": r["fail_streak"],
+                "manual_remaining": r["manual_remaining"] or 0}
 
 
 def set_campaign(**fields):
-    allowed = {"status", "start_ts", "fail_streak"}
+    allowed = {"status", "start_ts", "fail_streak", "manual_remaining"}
     sets, vals = [], []
     for k, v in fields.items():
         if k in allowed:
