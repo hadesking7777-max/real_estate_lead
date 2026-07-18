@@ -599,7 +599,10 @@ _LIVE_JS = """
     pending = false;
     var s0 = document.querySelector('.search');
     var q = s0 ? s0.value : '';
-    var sy = window.scrollY;
+    // on a navigation the router hands us the intended scroll (window.scrollY can be
+    // momentarily clamped mid-swap); otherwise keep the current position.
+    var sy = (typeof window.__navScroll === 'number') ? window.__navScroll : window.scrollY;
+    window.__navScroll = null;
     // remember the board's scroll so a refresh (e.g. right after a drag) doesn't jump it
     var board0 = document.querySelector('.board');
     var bx = board0 ? board0.scrollLeft : 0;
@@ -853,12 +856,16 @@ _SPA_JS = """
     if (title) { document.title = title; }
     var path = new URL(url, location.href).pathname;
     var k = keyOf(url);
+    var targetY = scrollPos.hasOwnProperty(k) ? scrollPos[k] : 0;
     setActive(path);
     runScripts(main);
-    window.scrollTo(0, scrollPos.hasOwnProperty(k) ? scrollPos[k] : 0);
+    window.scrollTo(0, targetY);
     curKey = k;
     if (pushIt) { history.pushState({ spa: url }, '', url); }
-    if (path === '/painel' && window.__panelRefresh) { window.__panelRefresh(); }
+    if (path === '/painel' && window.__panelRefresh) {
+      window.__navScroll = targetY;    // the refresh restores this, not a mid-swap value
+      window.__panelRefresh();
+    }
   }
   function go(url, pushIt) {
     scrollPos[curKey] = window.scrollY;   // remember where we were before leaving
