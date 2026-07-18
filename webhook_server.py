@@ -665,9 +665,9 @@ _SHARED_CSS = """<style>
   .empty-state { color: var(--text-muted); font-size: 13px; padding: 20px; text-align: center;
                  border: 1px dashed var(--border); border-radius: 10px; }
 
-  .board { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 10px; align-items: flex-start; }
+  .board { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 10px; align-items: stretch; }
   .board-col { flex: 0 0 250px; background: var(--page); border: 1px solid var(--border); border-radius: 12px;
-               display: flex; flex-direction: column; max-height: 620px; }
+               display: flex; flex-direction: column; height: 560px; }
   .board-col-head { padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex;
                     align-items: center; justify-content: space-between; border-top: 3px solid var(--text-muted);
                     border-radius: 12px 12px 0 0; }
@@ -679,7 +679,7 @@ _SHARED_CSS = """<style>
                      color: var(--text-secondary); }
   .board-col-count { font-size: 12px; color: var(--text-muted); background: var(--surface-1);
                      border: 1px solid var(--border); border-radius: 20px; padding: 1px 9px; font-variant-numeric: tabular-nums; }
-  .board-col-body { padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+  .board-col-body { flex: 1; min-height: 0; padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
   .kanban-card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
                  padding: 12px; box-shadow: var(--shadow); transition: border-color .12s ease, transform .12s ease; }
   .kanban-card:hover { border-color: var(--accent); transform: translateY(-1px); }
