@@ -581,6 +581,13 @@ _LIVE_JS = """
     var s0 = document.querySelector('.search');
     var q = s0 ? s0.value : '';
     var sy = window.scrollY;
+    // remember the board's scroll so a refresh (e.g. right after a drag) doesn't jump it
+    var board0 = document.querySelector('.board');
+    var bx = board0 ? board0.scrollLeft : 0;
+    var colY = {};
+    document.querySelectorAll('.board-col-body').forEach(function (cb) {
+      colY[cb.getAttribute('data-stage')] = cb.scrollTop;
+    });
     fetch('/painel/fragmento', {credentials: 'same-origin'})
       .then(function (r) { if (!r.ok) throw 0; return r.text(); })
       .then(function (html) {
@@ -588,6 +595,12 @@ _LIVE_JS = """
         var s1 = document.querySelector('.search');
         if (s1) s1.value = q;
         if (window.filterRows) window.filterRows(q);
+        var board1 = document.querySelector('.board');
+        if (board1) board1.scrollLeft = bx;                    // keep horizontal position
+        document.querySelectorAll('.board-col-body').forEach(function (cb) {
+          var st = colY[cb.getAttribute('data-stage')];
+          if (st != null) cb.scrollTop = st;                   // keep each column's position
+        });
         window.scrollTo(0, sy);
       })
       .catch(function () {});
