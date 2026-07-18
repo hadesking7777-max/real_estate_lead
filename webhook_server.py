@@ -1402,6 +1402,7 @@ def _render_contact(lead):
 
     body = f"""
   <a class="back-link" href="/painel">&larr; {T("Voltar ao painel")}</a>
+  <div class="contact-grid">
   <section>
     <div class="contact-header">
       <div>
@@ -1418,7 +1419,6 @@ def _render_contact(lead):
     {f'<div class="alert alert-bad">{T("Motivo da falha")}: {_e(lead.get("last_error"))}</div>' if lead.get("delivery") == "falhou" and lead.get("last_error") else ""}
   </section>
 
-  <div class="contact-grid">
   <section>
     <h2>{T("Tags")}</h2>
     <div class="panel-box">
