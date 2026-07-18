@@ -142,6 +142,8 @@ EN = {
     "Excluir contato": "Delete contact",
     "Excluir": "Delete",
     "Ja enviado": "Already sent",
+    "{n} contatos ja enviados estao em Pendentes.": "{n} already-sent contacts are sitting in Pending.",
+    "Mover para Contatados": "Move to Contacted",
     "Este contato ja recebeu a mensagem, mas esta em Pendentes. Provavelmente foi movido por engano.":
         "This contact was already messaged but is in Pending, it was probably moved here by mistake.",
     "Tem certeza que deseja excluir": "Are you sure you want to delete",
@@ -281,6 +283,8 @@ PT = {
     "Excluir": "Eliminar",
     "Este contato ja recebeu a mensagem, mas esta em Pendentes. Provavelmente foi movido por engano.":
         "Este contacto ja recebeu a mensagem, mas esta em Pendentes. Provavelmente foi movido por engano.",
+    "{n} contatos ja enviados estao em Pendentes.": "{n} contactos ja enviados estao em Pendentes.",
+    "Mover para Contatados": "Mover para Contactados",
     "Tem certeza que deseja excluir": "Tem a certeza de que deseja eliminar",
     "Qual o status do envio?": "Qual o estado do envio?",
     "Escolha como marcar este contato na coluna Contatados.": "Escolha como marcar este contacto na coluna Contactados.",

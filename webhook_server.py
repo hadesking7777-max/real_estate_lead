@@ -406,6 +406,25 @@ def board_etapa():
     return ("invalid", 400)
 
 
+@app.route("/pendentes/corrigir", methods=["POST"])
+@_requires_auth
+def pendentes_corrigir():
+    # bulk fix: move every already-sent contact stuck in Pending back to Contacted
+    who = PANEL_USER
+    moved = 0
+    for lead in lead_store.all_leads():
+        if lead.get("stage") == "pendente" and lead.get("last_send_ts"):
+            phone = lead["phone"]
+            lead_store.set_stage(phone, "contatado", actor=who, source="manual")
+            deliv = _delivery_for_stage("contatado", lead.get("delivery") or "pendente")
+            if deliv and deliv != lead.get("delivery"):
+                lead_store.set_delivery(phone, deliv, actor=who, source="manual")
+            moved += 1
+    if moved:
+        events.bump()
+    return redirect("/painel")
+
+
 @app.route("/contato/<phone>/tag", methods=["POST"])
 @_requires_auth
 def contato_tag_add(phone):
@@ -1250,6 +1269,9 @@ _SHARED_CSS = """<style>
   .alert { padding: 12px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 14px; }
   .alert-good { color: var(--status-good); background: var(--status-good-bg); }
   .alert-bad { color: var(--status-bad); background: var(--status-bad-bg); }
+  .alert-warn { color: var(--status-warning); background: var(--status-warning-bg); border: 1px solid var(--status-warning); }
+  .fix-banner { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+  .fix-banner form { margin: 0; }
   .empty-state { color: var(--text-muted); font-size: 13px; padding: 20px; text-align: center;
                  border: 1px dashed var(--border); border-radius: 10px; }
 
@@ -1815,21 +1837,17 @@ def _panel_sections():
     leads = sorted(lead_store.all_leads(), key=lambda l: l.get("nome") or "")
     total = counts.get("total", 0)
 
-    funnel_rows = ""
-    prev_count = total
-    ramp_steps = ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab"]
-    for i, (key, label) in enumerate(FUNNEL_STAGES):
-        c = counts.get(key, 0)
-        width_pct = (c / total * 100) if total else 0
-        color = ramp_steps[min(i, len(ramp_steps) - 1)]
-        conv = T(" &middot; {p} da etapa anterior", p=_fmt_pct(c, prev_count)) if i > 0 else ""
-        funnel_rows += f"""
-        <div class="funnel-row">
-          <div class="funnel-label">{T(label)}{_info_btn(key)}</div>
-          <div class="funnel-track"><div class="funnel-bar" style="width:{max(width_pct, 2):.1f}%; background:{color}"></div></div>
-          <div class="funnel-value">{c} <span class="funnel-pct">({_fmt_pct(c, total)}{conv})</span></div>
-        </div>"""
-        prev_count = c
+    # already-sent contacts that ended up back in Pending (likely moved by mistake)
+    sent_pending = sum(1 for l in leads if l.get("stage") == "pendente" and l.get("last_send_ts"))
+    fix_banner = ""
+    if sent_pending:
+        fix_banner = (
+            '<div class="alert alert-warn fix-banner">'
+            f'<span>{_WARN_ICON} {T("{n} contatos ja enviados estao em Pendentes.", n=sent_pending)}</span>'
+            '<form method="post" action="/pendentes/corrigir">'
+            f'<button class="btn btn-primary" type="submit">{T("Mover para Contatados")}</button>'
+            '</form></div>'
+        )
 
     # conversion rates
     sent = deliv["enviado"] + deliv["entregue"] + deliv["lido"] + deliv["respondeu"]
@@ -1944,8 +1962,7 @@ def _panel_sections():
     cm = conta_map.get(request.args.get("conta"))
     toast = f'<div class="alert alert-{cm[0]}">{T(cm[1])}</div>' if cm else ""
 
-    return toast + _render_campaign() + f"""
-  <section><h2>{T("Funil")}</h2><div class="funnel">{funnel_rows}</div></section>
+    return toast + fix_banner + _render_campaign() + f"""
   <section><h2>{T("Taxas de conversao")}</h2><div class="tiles">{rate_tiles}</div></section>
   <section><h2>{T("Envios por dia")}</h2>{_daily_sends_chart()}</section>
   <section><h2>{T("Leads quentes ({n})", n=len(hot))}</h2>{cards}</section>
