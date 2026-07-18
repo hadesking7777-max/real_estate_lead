@@ -1015,11 +1015,6 @@ def _render_panel_html():
     leads = sorted(lead_store.all_leads(), key=lambda l: l.get("nome") or "")
     total = counts.get("total", 0)
 
-    kpi_tiles = f'<div class="tile"><div class="tile-num">{total}</div><div class="tile-label">Total na base</div></div>'
-    for key, label in FUNNEL_STAGES:
-        cls = "tile tile-good" if key == "quente" else "tile"
-        kpi_tiles += f'<div class="{cls}"><div class="tile-num">{counts.get(key, 0)}</div><div class="tile-label">{label}</div></div>'
-
     funnel_rows = ""
     prev_count = total
     ramp_steps = ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab"]
@@ -1036,13 +1031,7 @@ def _render_panel_html():
         </div>"""
         prev_count = c
 
-    deliv_tiles = "".join(
-        f'<div class="tile"><div class="tile-num">{deliv.get(k, 0)}</div>'
-        f'<div class="tile-label">{DELIVERY_LABELS[k]}</div></div>'
-        for k in ["pendente", "enviado", "entregue", "lido", "respondeu", "falhou"]
-    )
-
-    # conversion rates (merged from the old Resultados tab)
+    # conversion rates
     sent = deliv["enviado"] + deliv["entregue"] + deliv["lido"] + deliv["respondeu"]
     delivered = deliv["entregue"] + deliv["lido"] + deliv["respondeu"]
     read = deliv["lido"] + deliv["respondeu"]
@@ -1053,12 +1042,6 @@ def _render_panel_html():
         f'<div class="tile-label">{lbl}</div><div class="tile-sub">{n} de {d}</div></div>'
         for n, d, lbl in [(delivered, sent, "Taxa de entrega"), (read, sent, "Taxa de leitura"),
                           (responded, sent, "Taxa de resposta"), (quente_n, responded, "Taxa de qualificacao")]
-    )
-
-    secondary_tiles = "".join(
-        f'<div class="tile tile-{cls}"><div class="tile-num">{counts.get(stage, 0)}</div>'
-        f'<div class="tile-label">{STAGE_LABELS[stage]}</div></div>'
-        for stage, cls in [("morno", "warning"), ("frio", "muted"), ("opt_out", "muted")]
     )
 
     cards = ""
@@ -1127,12 +1110,9 @@ def _render_panel_html():
         <div class="board">{cols_html}</div>"""
 
     body = _render_campaign() + f"""
-  <section><div class="tiles">{kpi_tiles}</div></section>
   <section><h2>Funil</h2><div class="funnel">{funnel_rows}</div></section>
   <section><h2>Taxas de conversao</h2><div class="tiles">{rate_tiles}</div></section>
-  <section><h2>Status de envio</h2><div class="tiles">{deliv_tiles}</div></section>
   <section><h2>Envios por dia</h2>{_daily_sends_chart()}</section>
-  <section><h2>Outros estados</h2><div class="tiles">{secondary_tiles}</div></section>
   <section><h2>Leads quentes ({len(hot)})</h2>{cards}</section>
   <section><h2>Contatos por status ({len(leads)})</h2>{board_section}</section>
   """ + _BOARD_JS
