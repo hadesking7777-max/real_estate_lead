@@ -698,7 +698,12 @@ _SPA_JS = """
   window.__spaInit = true;
   var main = document.querySelector('main');
   if (!main) return;
+  if ('scrollRestoration' in history) { history.scrollRestoration = 'manual'; }
   var cache = {};
+  var scrollPos = {};                                  // remembered scroll per page
+  var curKey = location.pathname + location.search;    // page currently shown
+
+  function keyOf(url) { var u = new URL(url, location.href); return u.pathname + u.search; }
 
   function spaPage(path) {
     return path.indexOf('/painel') === 0 || path.indexOf('/importar') === 0
@@ -723,13 +728,16 @@ _SPA_JS = """
     main.innerHTML = html;
     if (title) { document.title = title; }
     var path = new URL(url, location.href).pathname;
+    var k = keyOf(url);
     setActive(path);
     runScripts(main);
-    window.scrollTo(0, 0);
+    window.scrollTo(0, scrollPos.hasOwnProperty(k) ? scrollPos[k] : 0);
+    curKey = k;
     if (pushIt) { history.pushState({ spa: url }, '', url); }
     if (path === '/painel' && window.__panelRefresh) { window.__panelRefresh(); }
   }
   function go(url, pushIt) {
+    scrollPos[curKey] = window.scrollY;   // remember where we were before leaving
     try {
       if (cache[url]) { show(url, cache[url].h, cache[url].t, pushIt); return; }
       fetch(url, { credentials: 'same-origin' })
