@@ -822,6 +822,7 @@ _SHARED_CSS = """<style>
   section { margin-bottom: 28px; }
   .contact-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
   .contact-grid > section { margin-bottom: 0; }
+  .contact-grid > section.grid-full { grid-column: 1 / -1; }
   @media (max-width: 760px) { .contact-grid { grid-template-columns: 1fr; } }
   h2 { font-size: 12px; color: var(--text-muted); font-weight: 700; margin: 0 0 12px;
        text-transform: uppercase; letter-spacing: 0.6px; display: flex; align-items: center; gap: 8px; }
@@ -1383,7 +1384,7 @@ def _render_contact(lead):
     </div>
   </section>
 
-  <section>
+  <section class="grid-full">
     <h2>{T("Conversa")}</h2>
     <div class="timeline">{_timeline_html(lead)}</div>
   </section>
