@@ -302,6 +302,18 @@ FUNNEL_STAGES = [
     ("quente", "Quentes"),
 ]
 
+# Kanban board columns (status pipeline), in flow order. (stage_key, label, header css class)
+BOARD_COLUMNS = [
+    ("pendente", "Pendentes", ""),
+    ("contatado", "Contatados", "col-info"),
+    ("respondeu", "Responderam", "col-info"),
+    ("qualificando", "Em qualificacao", "col-info"),
+    ("quente", "Quentes", "col-good"),
+    ("morno", "Morno", "col-warning"),
+    ("frio", "Frio", ""),
+    ("opt_out", "Opt-out", "col-bad"),
+]
+
 
 def _fmt_pct(n, d):
     return f"{(n / d * 100):.0f}%" if d else "0%"
@@ -311,45 +323,16 @@ def _e(x):
     return html.escape(str(x if x is not None else ""))
 
 
-_SEARCH_JS = """
+_BOARD_JS = """
 <script>
-(function () {
-  var PAGE_SIZE = 25;
-  var page = 1;
-  var query = '';
-
-  function allRows() {
-    return Array.prototype.slice.call(document.querySelectorAll('#contacts-body tr'));
-  }
-  function matches(r) {
-    var hay = r.getAttribute('data-search') || '';
-    return !query || hay.indexOf(query) !== -1;
-  }
-  function render() {
-    var rows = allRows();
-    var visible = rows.filter(matches);
-    var totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
-    if (page > totalPages) page = totalPages;
-    if (page < 1) page = 1;
-    var start = (page - 1) * PAGE_SIZE;
-    var end = start + PAGE_SIZE;
-    var shown = 0;
-    rows.forEach(function (r) { r.style.display = 'none'; });
-    visible.forEach(function (r, i) {
-      if (i >= start && i < end) { r.style.display = ''; shown++; }
-    });
-    var info = document.getElementById('pager-info');
-    if (info) info.textContent = 'Pagina ' + page + ' de ' + totalPages + ' \\u00b7 ' + visible.length + ' contatos';
-    var prev = document.getElementById('pager-prev');
-    var next = document.getElementById('pager-next');
-    if (prev) prev.disabled = (page <= 1);
-    if (next) next.disabled = (page >= totalPages);
-  }
-  window.filterRows = function (q) { query = (q || '').toLowerCase().trim(); page = 1; render(); };
-  window.pagerPrev = function () { if (page > 1) { page--; render(); } };
-  window.pagerNext = function () { page++; render(); };
-  render();
-})();
+window.filterRows = function (q) {
+  q = (q || '').toLowerCase().trim();
+  var cards = document.querySelectorAll('.kanban-card');
+  cards.forEach(function (c) {
+    var hay = c.getAttribute('data-search') || '';
+    c.style.display = (!q || hay.indexOf(q) !== -1) ? '' : 'none';
+  });
+};
 </script>
 """
 
@@ -681,6 +664,28 @@ _SHARED_CSS = """<style>
   .alert-bad { color: var(--status-bad); background: var(--status-bad-bg); }
   .empty-state { color: var(--text-muted); font-size: 13px; padding: 20px; text-align: center;
                  border: 1px dashed var(--border); border-radius: 10px; }
+
+  .board { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 10px; align-items: flex-start; }
+  .board-col { flex: 0 0 250px; background: var(--page); border: 1px solid var(--border); border-radius: 12px;
+               display: flex; flex-direction: column; max-height: 620px; }
+  .board-col-head { padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex;
+                    align-items: center; justify-content: space-between; border-top: 3px solid var(--text-muted);
+                    border-radius: 12px 12px 0 0; }
+  .board-col.col-info .board-col-head { border-top-color: var(--accent); }
+  .board-col.col-good .board-col-head { border-top-color: var(--status-good); }
+  .board-col.col-warning .board-col-head { border-top-color: var(--status-warning); }
+  .board-col.col-bad .board-col-head { border-top-color: var(--status-bad); }
+  .board-col-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
+                     color: var(--text-secondary); }
+  .board-col-count { font-size: 12px; color: var(--text-muted); background: var(--surface-1);
+                     border: 1px solid var(--border); border-radius: 20px; padding: 1px 9px; font-variant-numeric: tabular-nums; }
+  .board-col-body { padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+  .kanban-card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
+                 padding: 12px; box-shadow: var(--shadow); transition: border-color .12s ease, transform .12s ease; }
+  .kanban-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .kanban-phone { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; margin-top: 4px; }
+  .kanban-foot { margin-top: 8px; }
+  .board-empty { color: var(--text-muted); font-size: 12px; text-align: center; padding: 16px 8px; }
   .pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 14px; }
   .pager-info { font-size: 13px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
   .pager .btn { margin: 0; }
@@ -1084,38 +1089,42 @@ def _render_panel_html():
         cards = '<div class="empty-state">Nenhum lead quente ainda. Assim que um investidor esquentar, aparece aqui.</div>'
 
     tmap = lead_store.tags_map()
-    table_rows = ""
-    for lead in leads:
+
+    def _kanban_card(lead):
         phone = lead["phone"]
         alltags = _auto_tags(lead) + tmap.get(phone, [])
         haystack = _e(f"{lead.get('nome','')} {phone} {lead.get('pais','')} {' '.join(alltags)}").lower()
         chips = "".join(f'<span class="chip chip-muted mini">{_e(t)}</span>' for t in alltags[:3])
         if len(alltags) > 3:
             chips += f'<span class="tag-more">+{len(alltags) - 3}</span>'
-        table_rows += f"""
-        <tr data-search="{haystack}">
-          <td><a class="contact-link" href="/contato/{_e(phone)}">{_e(lead.get('nome') or '(sem nome)')}</a>
-              <div class="row-tags">{chips}</div></td>
-          <td class="num">{_e(phone)}</td>
-          <td>{_e(lead.get('perfil'))}</td>
-          <td>{_e(lead.get('pais') or lead.get('origem') or '-')}</td>
-          <td>{_e(STAGE_LABELS.get(lead.get('stage'), lead.get('stage')))}</td>
-          <td>{_delivery_chip(lead.get('delivery', 'pendente'))}</td>
-        </tr>"""
-    if not leads:
-        table_section = '<div class="empty-state">Nenhum contato ainda. Importe uma planilha para comecar.</div>'
-    else:
-        table_section = f"""
-        <input class="search" type="search" placeholder="Buscar por nome, telefone ou pais..." oninput="filterRows(this.value)">
-        <div class="table-wrap"><table>
-          <thead><tr><th>Nome</th><th>Telefone</th><th>Perfil</th><th>Origem</th><th>Etapa</th><th>Entrega</th></tr></thead>
-          <tbody id="contacts-body">{table_rows}</tbody>
-        </table></div>
-        <div class="pager">
-          <button class="btn btn-ghost" id="pager-prev" onclick="pagerPrev()">Anterior</button>
-          <span id="pager-info" class="pager-info"></span>
-          <button class="btn btn-ghost" id="pager-next" onclick="pagerNext()">Proximo</button>
+        return f"""
+        <div class="kanban-card" data-search="{haystack}">
+          <a class="contact-link" href="/contato/{_e(phone)}">{_e(lead.get('nome') or '(sem nome)')}</a>
+          <div class="row-tags">{chips}</div>
+          <div class="kanban-phone">{_e(phone)}</div>
+          <div class="kanban-foot">{_delivery_chip(lead.get('delivery', 'pendente'))}</div>
         </div>"""
+
+    by_stage = {}
+    for lead in leads:
+        by_stage.setdefault(lead.get("stage"), []).append(lead)
+
+    cols_html = ""
+    for key, label, cls in BOARD_COLUMNS:
+        col_leads = by_stage.get(key, [])
+        inner = "".join(_kanban_card(l) for l in col_leads) or '<div class="board-empty">Vazio</div>'
+        cols_html += f"""
+        <div class="board-col {cls}">
+          <div class="board-col-head"><span class="board-col-title">{label}</span><span class="board-col-count">{len(col_leads)}</span></div>
+          <div class="board-col-body">{inner}</div>
+        </div>"""
+
+    if not leads:
+        board_section = '<div class="empty-state">Nenhum contato ainda. Importe uma planilha para comecar.</div>'
+    else:
+        board_section = f"""
+        <input class="search" type="search" placeholder="Buscar por nome, telefone, pais ou tag..." oninput="filterRows(this.value)">
+        <div class="board">{cols_html}</div>"""
 
     body = _render_campaign() + f"""
   <section><div class="tiles">{kpi_tiles}</div></section>
@@ -1125,8 +1134,8 @@ def _render_panel_html():
   <section><h2>Envios por dia</h2>{_daily_sends_chart()}</section>
   <section><h2>Outros estados</h2><div class="tiles">{secondary_tiles}</div></section>
   <section><h2>Leads quentes ({len(hot)})</h2>{cards}</section>
-  <section><h2>Contatos ({len(leads)})</h2>{table_section}</section>
-  """ + _SEARCH_JS
+  <section><h2>Contatos por status ({len(leads)})</h2>{board_section}</section>
+  """ + _BOARD_JS
 
     return _page("Painel Guerra Cyrela", "Painel do piloto de reativacao", "painel", body)
 
