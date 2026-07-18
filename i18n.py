@@ -171,6 +171,7 @@ EN = {
     "Nenhuma nota ainda.": "No notes yet.",
     "Conversa": "Conversation",
     "Nenhuma mensagem ainda.": "No messages yet.",
+    "Nao entregue": "Not delivered",
     "Abertura enviada": "Opener sent",
     "Follow-up 1 enviado": "Follow-up 1 sent",
     "Follow-up 2 enviado": "Follow-up 2 sent",
