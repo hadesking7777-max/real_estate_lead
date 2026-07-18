@@ -194,7 +194,7 @@ def _handle_status(status):
     wa_state = status.get("status")
     mapped = _WA_STATUS_MAP.get(wa_state)
     if phone and mapped:
-        lead_store.advance_delivery(phone, mapped)
+        lead_store.advance_delivery(phone, mapped, actor="auto", source="whatsapp")
         if wa_state == "failed":
             # keep WhatsApp's own error reason so the panel can show WHY it failed
             errs = status.get("errors") or []
@@ -223,11 +223,15 @@ def _handle_message(value, message):
 
     lead = lead_store.get_or_create_lead(phone, nome=nome)
     lead_store.append_history(phone, "lead", text)
-    lead_store.advance_delivery(phone, "respondeu")
+    lead_store.advance_delivery(phone, "respondeu", actor="auto", source="whatsapp")
 
     reply_text, updates = qualification.process_incoming(lead, text)
 
+    # apply an AI-driven stage change through set_stage so it lands in the history
+    new_stage = updates.pop("stage", None)
     lead_store.update_lead(phone, **updates)
+    if new_stage:
+        lead_store.set_stage(phone, new_stage, actor="auto", source="ia")
     lead_store.append_history(phone, "bot", reply_text)
     events.bump()  # reply + qualification updated the contact; push to open panels
 
@@ -381,14 +385,15 @@ def board_etapa():
     chosen = request.form.get("delivery", "")
     lead = lead_store.get_lead(phone) if phone else None
     if stage in lead_store.STAGES and lead:
-        lead_store.set_stage(phone, stage)
+        who = PANEL_USER  # single-login panel: the operator making the change
+        lead_store.set_stage(phone, stage, actor=who, source="manual")
         if chosen in DELIVERY_LABELS:
             # explicit tag picked in the modal (used when dropping into Contacted)
-            lead_store.update_lead(phone, delivery=chosen)
+            lead_store.set_delivery(phone, chosen, actor=who, source="manual")
         else:
             deliv = _delivery_for_stage(stage, lead.get("delivery") or "pendente")
             if deliv and deliv != lead.get("delivery"):
-                lead_store.update_lead(phone, delivery=deliv)
+                lead_store.set_delivery(phone, deliv, actor=who, source="manual")
         events.bump()  # push the move to every open panel
         return ("", 204)
     return ("invalid", 400)
@@ -878,6 +883,19 @@ _SHARED_CSS = """<style>
   .nav-ic { display: flex; }
   main { padding: 22px 20px 44px; max-width: 1280px; margin: 0 auto; }
   section { margin-bottom: 28px; }
+  .state-log { display: flex; flex-direction: column; }
+  .log-row { display: grid; grid-template-columns: 130px 96px 1fr auto; gap: 14px; align-items: baseline;
+             padding: 9px 2px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .log-row:last-child { border-bottom: none; }
+  .log-when { color: var(--text-muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .log-field { color: var(--text-secondary); font-weight: 600; text-transform: uppercase;
+               font-size: 11px; letter-spacing: .4px; }
+  .log-change { color: var(--text-primary); }
+  .log-actor { color: var(--text-muted); font-size: 12px; text-align: right; }
+  @media (max-width: 760px) {
+    .log-row { grid-template-columns: 1fr auto; gap: 4px 12px; }
+    .log-field { grid-row: 2; } .log-change { grid-row: 2; } .log-actor { text-align: right; }
+  }
   /* contact detail: header, tags, qualification and notes combined into one card */
   .combined-grid { display: grid; grid-template-columns: 1fr 1fr; }
   .combined-grid.panel-box { padding: 0; }
@@ -1383,6 +1401,44 @@ def _timeline_html(lead):
     return items or f'<div class="empty-state">{T("Nenhuma mensagem ainda.")}</div>'
 
 
+_LOG_FIELD_LABELS = {"stage": "Etapa", "delivery": "Entrega"}
+_LOG_SOURCE_LABELS = {"campanha": "Campanha", "whatsapp": "WhatsApp", "ia": "IA",
+                      "manual": "Manual", "import": "Importacao"}
+
+
+def _state_log_html(phone):
+    rows = lead_store.get_state_log(phone, 100)
+    if not rows:
+        return f'<div class="empty-state">{T("Nenhuma mudanca de estado ainda.")}</div>'
+
+    def vlabel(field, val):
+        if not val:
+            return "-"
+        if field == "stage":
+            return _e(T(STAGE_LABELS.get(val, val)))
+        if field == "delivery":
+            return _e(T(DELIVERY_LABELS.get(val, val)))
+        return _e(val)
+
+    out = ""
+    for r in rows:
+        actor = r["actor"] or "auto"
+        who = T("Automatico") if actor == "auto" else _e(actor)
+        src = r["source"] or ""
+        src_show = T(_LOG_SOURCE_LABELS[src]) if src in _LOG_SOURCE_LABELS else _e(src)
+        meta = who + (f" &middot; {src_show}" if src_show else "")
+        out += (
+            '<div class="log-row">'
+            f'<span class="log-when">{_fmt_ts(r["ts"])}</span>'
+            f'<span class="log-field">{_e(T(_LOG_FIELD_LABELS.get(r["field"], r["field"])))}</span>'
+            f'<span class="log-change">{vlabel(r["field"], r["from_val"])} &rarr; '
+            f'<b>{vlabel(r["field"], r["to_val"])}</b></span>'
+            f'<span class="log-actor">{meta}</span>'
+            '</div>'
+        )
+    return f'<div class="state-log">{out}</div>'
+
+
 def _render_contact(lead):
     phone = lead["phone"]
     auto = _auto_tags(lead)
@@ -1453,6 +1509,11 @@ def _render_contact(lead):
         <div class="notes-list">{notes_list}</div>
       </div>
     </div>
+  </section>
+
+  <section>
+    <h2>{T("Historico de estados")}</h2>
+    <div class="panel-box">{_state_log_html(phone)}</div>
   </section>
 
   <section>

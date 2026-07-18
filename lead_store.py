@@ -13,6 +13,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "leads.db")
 DB_PATH = DEFAULT_DB_PATH
@@ -87,6 +88,17 @@ CREATE TABLE IF NOT EXISTS notes (
   text TEXT,
   ts REAL
 );
+CREATE TABLE IF NOT EXISTS state_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  phone TEXT,
+  ts REAL,
+  actor TEXT,
+  field TEXT,
+  from_val TEXT,
+  to_val TEXT,
+  source TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_state_log_phone ON state_log(phone);
 CREATE INDEX IF NOT EXISTS idx_history_phone ON history(phone);
 CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(stage);
 CREATE INDEX IF NOT EXISTS idx_leads_delivery ON leads(delivery);
@@ -281,13 +293,63 @@ def append_history(phone, role, text):
         return _row_to_lead(conn, row) if row else None
 
 
-def set_stage(phone, stage):
+def _insert_state_log(conn, phone, field, from_val, to_val, actor, source, ts):
+    conn.execute(
+        "INSERT INTO state_log(phone,ts,actor,field,from_val,to_val,source) VALUES(?,?,?,?,?,?,?)",
+        (phone, ts if ts is not None else time.time(), actor, field, from_val, to_val, source),
+    )
+
+
+def log_state(phone, field, from_val, to_val, actor="auto", source="", ts=None):
+    """Record a stage/delivery change for the contact's history."""
+    _ensure_init()
+    with _conn() as conn:
+        _insert_state_log(conn, phone, field, from_val, to_val, actor, source, ts)
+        conn.commit()
+
+
+def get_state_log(phone, limit=100):
+    _ensure_init()
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT ts, actor, field, from_val, to_val, source FROM state_log "
+            "WHERE phone=? ORDER BY ts DESC, id DESC LIMIT ?", (phone, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def set_stage(phone, stage, actor="auto", source="", ts=None):
     if stage not in STAGES:
         raise ValueError(f"Unknown stage: {stage}")
+    _ensure_init()
+    with _conn() as conn:
+        row = conn.execute("SELECT stage FROM leads WHERE phone=?", (phone,)).fetchone()
+        old = (row["stage"] if row else None)
+        if old != stage:
+            _insert_state_log(conn, phone, "stage", old, stage, actor, source, ts)
+            conn.commit()
     return update_lead(phone, stage=stage)
 
 
-def advance_delivery(phone, new_state):
+def set_delivery(phone, new_state, actor="auto", source="", ts=None):
+    """Set the delivery state directly (may move backward) and log the change."""
+    if new_state not in _DELIVERY_RANK:
+        return None
+    _ensure_init()
+    with _conn() as conn:
+        row = conn.execute("SELECT delivery FROM leads WHERE phone=?", (phone,)).fetchone()
+        if not row:
+            return None
+        current = row["delivery"] or "pendente"
+        if current != new_state:
+            conn.execute("UPDATE leads SET delivery=? WHERE phone=?", (new_state, phone))
+            _insert_state_log(conn, phone, "delivery", current, new_state, actor, source, ts)
+            conn.commit()
+        full = conn.execute("SELECT * FROM leads WHERE phone=?", (phone,)).fetchone()
+        return _row_to_lead(conn, full)
+
+
+def advance_delivery(phone, new_state, actor="auto", source="", ts=None):
     if new_state not in _DELIVERY_RANK:
         return None
     _ensure_init()
@@ -298,6 +360,7 @@ def advance_delivery(phone, new_state):
         current = row["delivery"] or "pendente"
         if _DELIVERY_RANK.get(new_state, 0) > _DELIVERY_RANK.get(current, 0):
             conn.execute("UPDATE leads SET delivery=? WHERE phone=?", (new_state, phone))
+            _insert_state_log(conn, phone, "delivery", current, new_state, actor, source, ts)
             conn.commit()
         full = conn.execute("SELECT * FROM leads WHERE phone=?", (phone,)).fetchone()
         return _row_to_lead(conn, full)

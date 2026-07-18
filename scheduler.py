@@ -85,6 +85,12 @@ def _apply_success(lead, kind, template, resp_text, now):
     if kind == "opener":
         lead_store.update_lead(lead["phone"], stage="contatado", delivery="enviado",
                                last_template_used=template, last_wamid=wamid, last_send_ts=now)
+        if lead.get("stage") != "contatado":
+            lead_store.log_state(lead["phone"], "stage", lead.get("stage"), "contatado",
+                                 actor="auto", source="campanha", ts=now)
+        if lead.get("delivery") != "enviado":
+            lead_store.log_state(lead["phone"], "delivery", lead.get("delivery"), "enviado",
+                                 actor="auto", source="campanha", ts=now)
     else:
         lead_store.update_lead(lead["phone"], last_template_used=template, last_wamid=wamid,
                                last_send_ts=now, followup_count=(1 if kind == "followup1" else 2))
@@ -125,7 +131,7 @@ def tick(now=None, sender=None):
         events.bump()  # state committed; push an update to any open panel
         return {"action": "sent", "phone": lead["phone"], "template": template, "remaining": new_remaining}
 
-    lead_store.advance_delivery(lead["phone"], "falhou")
+    lead_store.advance_delivery(lead["phone"], "falhou", actor="auto", source="campanha")
     try:  # keep the API error reason so the panel can show WHY it failed
         import json
         err = (json.loads(resp) or {}).get("error", {})
