@@ -1857,12 +1857,13 @@ def _panel_sections():
         if len(alltags) > 3:
             chips += f'<span class="tag-more">+{len(alltags) - 3}</span>'
         email_line = f'<div class="kanban-email">{_e(email)}</div>' if email else ""
-        # The delivery chip is only worth showing once something has been sent.
-        # A "pendente" delivery just repeats the Pendentes column header, so skip it.
+        # The delivery tag is only meaningful in the Contacted column (Sent/Delivered/
+        # Read/Failed). In every other column it would just restate the column ("Replied"
+        # for all of them, nothing for Pending), so we only show it under Contacted.
         deliv = lead.get("delivery", "pendente")
         err = lead.get("last_error") or ""
         foot = ""
-        if deliv != "pendente":
+        if lead.get("stage") == "contatado" and deliv != "pendente":
             reason = f'<div class="kanban-error">{_e(err)}</div>' if (deliv == "falhou" and err) else ""
             foot = f'<div class="kanban-foot">{_delivery_chip(deliv, err if deliv == "falhou" else None)}</div>{reason}'
         nome = lead.get('nome') or T('(sem nome)')
