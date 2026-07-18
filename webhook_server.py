@@ -356,14 +356,30 @@ def contato_etapa(phone):
     return redirect(f"/contato/{phone}")
 
 
+def _delivery_for_stage(stage, current):
+    """Delivery state that keeps the card chip consistent with a manual stage move.
+    Returns None to leave delivery untouched (e.g. not to downgrade a real receipt)."""
+    if stage == "pendente":
+        return "pendente"
+    if stage == "contatado":
+        # at least "sent", but never downgrade a real delivered/read receipt
+        return "enviado" if current in ("pendente", "falhou") else None
+    # every later stage (replied, qualifying, hot, warm, cold, opt-out) means they replied
+    return "respondeu"
+
+
 @app.route("/board/etapa", methods=["POST"])
 @_requires_auth
 def board_etapa():
     # drag-and-drop stage change on the board; returns no body (AJAX)
     phone = request.form.get("phone", "")
     stage = request.form.get("stage", "")
-    if stage in lead_store.STAGES and lead_store.get_lead(phone):
+    lead = lead_store.get_lead(phone) if phone else None
+    if stage in lead_store.STAGES and lead:
         lead_store.set_stage(phone, stage)
+        deliv = _delivery_for_stage(stage, lead.get("delivery") or "pendente")
+        if deliv and deliv != lead.get("delivery"):
+            lead_store.update_lead(phone, delivery=deliv)
         events.bump()  # push the move to every open panel
         return ("", 204)
     return ("invalid", 400)
