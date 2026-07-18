@@ -258,6 +258,12 @@ def campanha_parar():
     return redirect("/painel")
 
 
+@app.route("/campanha/status")
+@_requires_auth
+def campanha_status():
+    return jsonify(scheduler.status_summary())
+
+
 @app.route("/contato/<phone>")
 @_requires_auth
 def contato(phone):
@@ -362,6 +368,32 @@ _INFO_MODAL_HTML = """
       <p id="modal-text" class="modal-text"></p>
     </div>
   </div>"""
+
+# Live-polls the campaign status while a batch is sending, updating the progress
+# bar and counts in place; reloads the page once the batch finishes.
+_CAMPAIGN_JS = """
+<script>
+(function () {
+  var box = document.getElementById('campaign-box');
+  if (!box || box.getAttribute('data-sending') !== '1') return;
+  function poll() {
+    fetch('/campanha/status', {credentials: 'same-origin'})
+      .then(function (r) { return r.json(); })
+      .then(function (s) {
+        if (s.status !== 'running' || s.remaining <= 0) { window.location.reload(); return; }
+        var chip = document.getElementById('camp-chip');
+        if (chip) chip.innerHTML = 'Enviando \\u00b7 faltam ' + s.remaining;
+        var m = document.getElementById('camp-metrics');
+        if (m) m.innerHTML = 'Total enviados ' + s.total_enviados + ' \\u00b7 Pendentes ' + s.pendentes;
+        var bar = document.getElementById('camp-progress-bar');
+        if (bar && s.total) bar.style.width = Math.round((s.total - s.remaining) / s.total * 100) + '%';
+        setTimeout(poll, 3000);
+      })
+      .catch(function () { setTimeout(poll, 5000); });
+  }
+  setTimeout(poll, 3000);
+})();
+</script>"""
 
 
 _BOARD_JS = """
@@ -680,12 +712,15 @@ _SHARED_CSS = """<style>
   .login-error { background: var(--status-bad-bg); color: var(--status-bad); font-size: 13px;
                  padding: 10px 12px; border-radius: 8px; margin-bottom: 6px; text-align: left; }
   .campaign-box { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
-                  padding: 16px 20px; box-shadow: var(--shadow); display: flex; align-items: center;
-                  justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+                  padding: 16px 20px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 14px; }
+  .campaign-top { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
   .campaign-info { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .campaign-metrics { font-size: 13px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
   .campaign-box form { margin: 0; }
   .campaign-box .btn { margin-right: 0; }
+  .camp-progress { height: 8px; background: var(--page); border-radius: 5px; overflow: hidden; }
+  .camp-progress-bar { height: 100%; background: var(--status-good); border-radius: 5px;
+                       min-width: 4px; transition: width .4s ease; }
   .send-form { display: flex; align-items: center; gap: 8px; }
   .qty-input { width: 84px; padding: 10px 12px; border-radius: 9px; border: 1px solid var(--border);
                background: var(--page); color: var(--text-primary); font-size: 14px; text-align: center;
@@ -1154,18 +1189,26 @@ def _render_campaign():
             f'value="{default_q}" title="Quantos contatos enviar agora">'
             '<button class="btn btn-primary" type="submit">Enviar agora</button>'
             '</form>')
+    progress = ""
+    if sending and s["total"]:
+        pct = int((s["total"] - s["remaining"]) / s["total"] * 100)
+        progress = (f'<div class="camp-progress"><div class="camp-progress-bar" id="camp-progress-bar" '
+                    f'style="width:{pct}%"></div></div>')
     return f"""
   <section>
     <h2>Campanha{_info_btn('campanha')}</h2>
     {warn}
-    <div class="campaign-box">
-      <div class="campaign-info">
-        <span class="chip {chip}">{label}</span>
-        <span class="campaign-metrics">{metrics}</span>
+    <div class="campaign-box" id="campaign-box" data-sending="{'1' if sending else '0'}">
+      <div class="campaign-top">
+        <div class="campaign-info">
+          <span class="chip {chip}" id="camp-chip">{label}</span>
+          <span class="campaign-metrics" id="camp-metrics">{metrics}</span>
+        </div>
+        {control}
       </div>
-      {control}
+      {progress}
     </div>
-  </section>"""
+  </section>{_CAMPAIGN_JS}"""
 
 
 def _render_panel_html():

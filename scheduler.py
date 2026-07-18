@@ -140,6 +140,7 @@ def status_summary(now=None):
     return {
         "status": camp["status"],
         "remaining": camp.get("manual_remaining", 0) or 0,
+        "total": camp.get("manual_total", 0) or 0,
         "total_enviados": total - pendente,
         "pendentes": pendente,
         "fail_streak": camp["fail_streak"] or 0,
@@ -153,14 +154,19 @@ def queue_manual(n):
     n = max(0, int(n or 0))
     pend = lead_store.funnel_counts().get("pendente", 0)
     camp = lead_store.get_campaign()
-    remaining = min((camp.get("manual_remaining", 0) or 0) + n, pend)
+    current = camp.get("manual_remaining", 0) or 0
+    remaining = min(current + n, pend)
+    added = max(0, remaining - current)
+    # batch total: reset when starting fresh, grow when adding to a live batch
+    total = remaining if current <= 0 else (camp.get("manual_total", 0) or 0) + added
     status = "running" if remaining > 0 else "idle"
-    return lead_store.set_campaign(manual_remaining=remaining, status=status, fail_streak=0)
+    return lead_store.set_campaign(manual_remaining=remaining, manual_total=total,
+                                   status=status, fail_streak=0)
 
 
 def stop_manual():
     """Stop the current batch, clearing whatever is left in the queue."""
-    return lead_store.set_campaign(manual_remaining=0, status="idle")
+    return lead_store.set_campaign(manual_remaining=0, manual_total=0, status="idle")
 
 
 # --- background thread ---
