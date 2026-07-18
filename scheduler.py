@@ -19,6 +19,7 @@ import os
 import threading
 import time
 
+import events
 import lead_store
 import send
 
@@ -121,6 +122,7 @@ def tick(now=None, sender=None):
         if new_remaining <= 0:
             fields["status"] = "idle"
         lead_store.set_campaign(**fields)
+        events.bump()  # state committed; push an update to any open panel
         return {"action": "sent", "phone": lead["phone"], "template": template, "remaining": new_remaining}
 
     lead_store.advance_delivery(lead["phone"], "falhou")
@@ -129,6 +131,7 @@ def tick(now=None, sender=None):
     if streak >= MAX_FAIL_STREAK:
         fields["status"] = "paused"  # stop after repeated failures (bad token/setup)
     lead_store.set_campaign(**fields)
+    events.bump()
     return {"action": "failed", "phone": lead["phone"], "status": status, "streak": streak}
 
 
@@ -160,13 +163,17 @@ def queue_manual(n):
     # batch total: reset when starting fresh, grow when adding to a live batch
     total = remaining if current <= 0 else (camp.get("manual_total", 0) or 0) + added
     status = "running" if remaining > 0 else "idle"
-    return lead_store.set_campaign(manual_remaining=remaining, manual_total=total,
-                                   status=status, fail_streak=0)
+    r = lead_store.set_campaign(manual_remaining=remaining, manual_total=total,
+                                status=status, fail_streak=0)
+    events.bump()
+    return r
 
 
 def stop_manual():
     """Stop the current batch, clearing whatever is left in the queue."""
-    return lead_store.set_campaign(manual_remaining=0, manual_total=0, status="idle")
+    r = lead_store.set_campaign(manual_remaining=0, manual_total=0, status="idle")
+    events.bump()
+    return r
 
 
 # --- background thread ---

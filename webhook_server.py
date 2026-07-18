@@ -26,7 +26,7 @@ import uuid
 from datetime import datetime, timedelta
 from functools import wraps
 
-from flask import Flask, request, jsonify, redirect, session
+from flask import Flask, request, jsonify, redirect, session, Response, stream_with_context
 from werkzeug.security import generate_password_hash, check_password_hash
 
 import lead_store
@@ -35,6 +35,7 @@ import send
 import base_import
 import run_history
 import scheduler
+import events
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8 MB cap on uploads
@@ -173,6 +174,7 @@ def _handle_status(status):
     mapped = _WA_STATUS_MAP.get(wa_state)
     if phone and mapped:
         lead_store.advance_delivery(phone, mapped)
+        events.bump()  # delivery status changed; push to open panels
 
 
 def _handle_message(value, message):
@@ -193,6 +195,7 @@ def _handle_message(value, message):
 
     lead_store.update_lead(phone, **updates)
     lead_store.append_history(phone, "bot", reply_text)
+    events.bump()  # reply + qualification updated the contact; push to open panels
 
     status, resp_text = send.send_text(phone, reply_text)
     if status not in (200, 201):
@@ -208,8 +211,28 @@ def painel():
 @app.route("/painel/fragmento")
 @_requires_auth
 def painel_fragmento():
-    # inner content only, for the live refresh loop to swap into <main>
+    # inner content only, for the live refresh to swap into <main>
     return _panel_sections()
+
+
+@app.route("/eventos")
+@_requires_auth
+def eventos():
+    # Server-Sent Events: pushes "change" the instant state changes (send,
+    # webhook, import), so pages update immediately instead of on a timer.
+    def gen():
+        last = events.current_version()
+        yield "retry: 3000\n\n"
+        while True:
+            v = events.wait_for_change(last, timeout=25)
+            if v != last:
+                last = v
+                yield "data: change\n\n"
+            else:
+                yield ": keepalive\n\n"
+    return Response(stream_with_context(gen()), mimetype="text/event-stream",
+                   headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                            "Connection": "keep-alive"})
 
 
 @app.route("/resultados")
@@ -250,6 +273,7 @@ def importar_analisar():
         f"{file.filename}: {analysis['total_rows']} linhas, {len(analysis['clean'])} BR, "
         f"{len(analysis['internacionais'])} internacionais, {analysis['removed_duplicates']} duplicados",
     )
+    events.bump()  # new analysis in the history; push to open pages
     return _render_import_review(token, analysis)
 
 
@@ -338,6 +362,7 @@ def importar_confirmar():
         f"{imported} contatos importados, {skipped} ja existiam"
         + (f", incluindo {len(analysis['internacionais'])} internacionais" if include_intl else ""),
     )
+    events.bump()  # contacts imported; push to open pages
     return _render_import_done(imported, skipped, include_intl,
                                len(analysis["internacionais"]))
 
@@ -390,7 +415,9 @@ _INFO_MODAL_HTML = """
 _LIVE_JS = """
 <script>
 (function () {
-  var REFRESH_MS = 4000;
+  var main = document.querySelector('main');
+  if (!main) return;
+  var pending = false, timer = null;
   function busy() {
     var ae = document.activeElement;
     if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT')) return true;
@@ -398,28 +425,35 @@ _LIVE_JS = """
     var pm = document.getElementById('pwd-modal'); if (pm && !pm.hidden) return true;
     return false;
   }
-  function schedule() { setTimeout(refresh, REFRESH_MS); }
-  function refresh() {
-    if (busy()) { schedule(); return; }
-    var main = document.querySelector('main');
+  function apply() {
+    if (busy()) { pending = true; return; }
+    pending = false;
     var s0 = document.querySelector('.search');
     var q = s0 ? s0.value : '';
     var sy = window.scrollY;
     fetch('/painel/fragmento', {credentials: 'same-origin'})
       .then(function (r) { if (!r.ok) throw 0; return r.text(); })
       .then(function (html) {
-        if (main) {
-          main.innerHTML = html;
-          var s1 = document.querySelector('.search');
-          if (s1) s1.value = q;
-          if (window.filterRows) window.filterRows(q);
-          window.scrollTo(0, sy);
-        }
-        schedule();
+        main.innerHTML = html;
+        var s1 = document.querySelector('.search');
+        if (s1) s1.value = q;
+        if (window.filterRows) window.filterRows(q);
+        window.scrollTo(0, sy);
       })
-      .catch(function () { schedule(); });
+      .catch(function () {});
   }
-  schedule();
+  function nudge() { clearTimeout(timer); timer = setTimeout(apply, 150); }
+  document.addEventListener('focusout', function () { if (pending) nudge(); });
+  document.addEventListener('click', function () { if (pending) nudge(); });
+  // instant push via Server-Sent Events; falls back to slow polling if unsupported
+  if (window.EventSource) {
+    try {
+      var es = new EventSource('/eventos');
+      es.onmessage = function () { nudge(); };
+    } catch (e) { setInterval(nudge, 6000); }
+  } else {
+    setInterval(nudge, 6000);
+  }
 })();
 </script>"""
 
@@ -464,18 +498,21 @@ document.addEventListener('keydown', function (e) { if (e.key === 'Escape') wind
 _IMPORT_LIVE_JS = """
 <script>
 (function () {
-  function schedule() { setTimeout(refresh, 5000); }
-  function refresh() {
+  var timer = null;
+  function apply() {
     fetch('/importar/historico', {credentials: 'same-origin'})
       .then(function (r) { if (!r.ok) throw 0; return r.text(); })
       .then(function (html) {
         var el = document.getElementById('history-live');
         if (el) el.innerHTML = html;
-        schedule();
       })
-      .catch(function () { schedule(); });
+      .catch(function () {});
   }
-  schedule();
+  function nudge() { clearTimeout(timer); timer = setTimeout(apply, 150); }
+  if (window.EventSource) {
+    try { var es = new EventSource('/eventos'); es.onmessage = function () { nudge(); }; }
+    catch (e) { setInterval(nudge, 6000); }
+  } else { setInterval(nudge, 6000); }
 })();
 </script>"""
 
@@ -1518,4 +1555,5 @@ if __name__ == "__main__":
     scheduler.start_background()
     # Bind to localhost so the app is reachable only through nginx (the HTTPS
     # domain), not directly on the raw IP:8000. Override with BIND_HOST if needed.
-    app.run(host=os.environ.get("BIND_HOST", "127.0.0.1"), port=8000)
+    # threaded=True so a held-open SSE stream never blocks other requests.
+    app.run(host=os.environ.get("BIND_HOST", "127.0.0.1"), port=8000, threaded=True)
