@@ -511,6 +511,7 @@ def _deliv_modal_html():
 _LIVE_JS = """
 <script>
 (function () {
+  if (window.__liveInit) return; window.__liveInit = true;   // set up once, survives SPA swaps
   var main = document.querySelector('main');
   if (!main) return;
   var pending = false, timer = null;
@@ -523,6 +524,7 @@ _LIVE_JS = """
     return false;
   }
   function apply() {
+    if (location.pathname !== '/painel') return;   // only the panel; never clobber other pages
     if (busy()) { pending = true; return; }
     pending = false;
     var s0 = document.querySelector('.search');
@@ -539,6 +541,7 @@ _LIVE_JS = """
       })
       .catch(function () {});
   }
+  window.__panelRefresh = apply;   // the SPA router calls this after navigating to the panel
   function nudge() { clearTimeout(timer); timer = setTimeout(apply, 150); }
   document.addEventListener('focusout', function () { if (pending) nudge(); });
   document.addEventListener('click', function () { if (pending) nudge(); });
@@ -581,6 +584,8 @@ def _board_js():
     )
     return """
 <script>
+(function () {
+if (window.__boardInit) return; window.__boardInit = true;   // set up once, survives SPA swaps
 window.filterRows = function (q) {
   q = (q || '').toLowerCase().trim();
   document.querySelectorAll('.kanban-card').forEach(function (c) {
@@ -678,12 +683,97 @@ document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { wi
     postMove(phone, stage, null);
   });
 })();
+})();
 </script>
 """
+
+# Client-side navigation: intercept internal links, swap only <main>, cache
+# visited pages, and update history, so switching pages / opening a contact
+# doesn't do a full reload. Page scripts are re-run (they guard against double
+# init); the panel refreshes its live data after being shown.
+_SPA_JS = """
+<script>
+(function () {
+  if (window.__spaInit || !window.history.pushState) return;
+  window.__spaInit = true;
+  var main = document.querySelector('main');
+  if (!main) return;
+  var cache = {};
+
+  function spaPage(path) {
+    return path.indexOf('/painel') === 0 || path.indexOf('/importar') === 0
+        || path.indexOf('/contato/') === 0;
+  }
+  function runScripts(root) {
+    root.querySelectorAll('script').forEach(function (old) {
+      var s = document.createElement('script');
+      if (old.src) { s.src = old.src; } else { s.textContent = old.textContent; }
+      document.body.appendChild(s);
+      document.body.removeChild(s);
+    });
+  }
+  function setActive(path) {
+    document.querySelectorAll('.nav-item').forEach(function (a) {
+      var href = a.getAttribute('href');
+      var on = (href === path) || (path.indexOf('/contato/') === 0 && href === '/painel');
+      a.classList.toggle('active', on);
+    });
+  }
+  function show(url, html, title, pushIt) {
+    main.innerHTML = html;
+    if (title) { document.title = title; }
+    var path = new URL(url, location.href).pathname;
+    setActive(path);
+    runScripts(main);
+    window.scrollTo(0, 0);
+    if (pushIt) { history.pushState({ spa: url }, '', url); }
+    if (path === '/painel' && window.__panelRefresh) { window.__panelRefresh(); }
+  }
+  function go(url, pushIt) {
+    try {
+      if (cache[url]) { show(url, cache[url].h, cache[url].t, pushIt); return; }
+      fetch(url, { credentials: 'same-origin' })
+        .then(function (r) { if (!r.ok) throw 0; return r.text(); })
+        .then(function (txt) {
+          var doc = new DOMParser().parseFromString(txt, 'text/html');
+          var nm = doc.querySelector('main');
+          if (!nm) { location.href = url; return; }
+          var tEl = doc.querySelector('title');
+          var t = tEl ? tEl.textContent : document.title;
+          cache[url] = { h: nm.innerHTML, t: t };
+          show(url, nm.innerHTML, t, pushIt);
+        })
+        .catch(function () { location.href = url; });
+    } catch (e) { location.href = url; }
+  }
+  document.addEventListener('click', function (e) {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    var a = e.target.closest ? e.target.closest('a') : null;
+    if (!a || a.target === '_blank' || a.hasAttribute('download')) return;
+    if (a.origin !== location.origin) return;
+    var path = a.pathname || '';
+    if (!spaPage(path)) return;                              // only these pages
+    if (path.indexOf('/idioma') === 0 || path.indexOf('/logout') === 0) return;  // full load
+    var href = a.getAttribute('href');
+    if (!href || href.charAt(0) === '#') return;
+    e.preventDefault();
+    if (path === location.pathname && (a.search || '') === (location.search || '')) {
+      if (path === '/painel' && window.__panelRefresh) { window.__panelRefresh(); }
+      return;
+    }
+    go(href, true);
+  });
+  window.addEventListener('popstate', function () {
+    if (spaPage(location.pathname)) { go(location.pathname + location.search, false); }
+  });
+})();
+</script>"""
+
 
 _IMPORT_LIVE_JS = """
 <script>
 (function () {
+  if (window.__importLiveInit) return; window.__importLiveInit = true;
   var timer = null;
   function apply() {
     fetch('/importar/historico', {credentials: 'same-origin'})
@@ -1343,6 +1433,7 @@ def _page(title, subtitle, active, body):
         + _nav(active)
         + f"<main>{body}</main>"
         + _account_html()
+        + _SPA_JS
         + "</body></html>"
     )
 
