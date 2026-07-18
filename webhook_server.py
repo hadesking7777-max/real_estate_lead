@@ -421,6 +421,16 @@ def contato_nota(phone):
     return redirect(f"/contato/{phone}")
 
 
+@app.route("/contato/<phone>/excluir", methods=["POST"])
+@_requires_auth
+def contato_excluir(phone):
+    ok = lead_store.delete_lead(phone)
+    if ok:
+        events.bump()  # contact removed; push to every open panel
+        return ("", 204)
+    return ("not found", 404)
+
+
 @app.route("/importar/confirmar", methods=["POST"])
 @_requires_auth
 def importar_confirmar():
@@ -504,6 +514,21 @@ def _deliv_modal_html():
     </div>
   </div>"""
 
+
+def _confirm_del_modal_html():
+    return f"""
+  <div id="del-modal" class="modal-overlay" hidden onclick="if(event.target===this)closeDel()">
+    <div class="modal-card">
+      <div class="modal-head"><span class="modal-title">{T("Excluir contato")}</span>
+        <button class="modal-close" type="button" onclick="closeDel()">&times;</button></div>
+      <p class="modal-text">{T("Tem certeza que deseja excluir")} <b id="del-name"></b>? {T("Esta acao nao pode ser desfeita.")}</p>
+      <div class="form-actions form-actions-split">
+        <button class="btn btn-ghost" type="button" onclick="closeDel()">{T("Cancelar")}</button>
+        <button class="btn btn-danger" type="button" id="del-confirm">{T("Excluir")}</button>
+      </div>
+    </div>
+  </div>"""
+
 # Live panel refresh: re-fetches the panel content every few seconds and swaps
 # it in place, so every section (campaign progress, funnel, rates, chart, hot
 # leads, board) reflects the campaign in real time. Preserves the search text
@@ -521,6 +546,7 @@ _LIVE_JS = """
     var sm = document.getElementById('state-modal'); if (sm && !sm.hidden) return true;
     var pm = document.getElementById('pwd-modal'); if (pm && !pm.hidden) return true;
     var dm = document.getElementById('deliv-modal'); if (dm && !dm.hidden) return true;
+    var xm = document.getElementById('del-modal'); if (xm && !xm.hidden) return true;
     return false;
   }
   function apply() {
@@ -605,7 +631,7 @@ window.showState = function (k) {
 window.hideState = function () {
   var m = document.getElementById('state-modal'); if (m) m.hidden = true;
 };
-document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { window.hideState(); if (window.closeDeliv) window.closeDeliv(); } });
+document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { window.hideState(); if (window.closeDeliv) window.closeDeliv(); if (window.closeDel) window.closeDel(); } });
 
 // Drag a card between columns to change its stage. Delegated on document so it
 // keeps working after the live refresh swaps the board's HTML.
@@ -683,6 +709,33 @@ document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { wi
     postMove(phone, stage, null);
   });
 })();
+
+// Delete a contact: the card's X opens a confirm modal; confirming removes it.
+var pendingDel = null;
+window.closeDel = function () {
+  var m = document.getElementById('del-modal'); if (m) m.hidden = true;
+  pendingDel = null;
+};
+document.addEventListener('click', function (e) {
+  var del = e.target.closest && e.target.closest('.card-del');
+  if (del) {
+    e.preventDefault(); e.stopPropagation();
+    pendingDel = del.getAttribute('data-phone');
+    var nm = document.getElementById('del-name');
+    if (nm) nm.textContent = del.getAttribute('data-name') || '';
+    var m = document.getElementById('del-modal'); if (m) m.hidden = false;
+    return;
+  }
+  var ok = e.target.closest && e.target.closest('#del-confirm');
+  if (ok && pendingDel) {
+    var phone = pendingDel; pendingDel = null;
+    var m = document.getElementById('del-modal'); if (m) m.hidden = true;
+    var card = document.querySelector('.kanban-card[data-phone="' + phone + '"]');
+    if (card) card.remove();   // optimistic; the push refresh reconciles counts
+    fetch('/contato/' + encodeURIComponent(phone) + '/excluir',
+          { method: 'POST', credentials: 'same-origin' }).catch(function () {});
+  }
+});
 })();
 </script>
 """
@@ -1089,8 +1142,11 @@ _SHARED_CSS = """<style>
   .btn-primary:hover:not(:disabled) { filter: brightness(1.07); box-shadow: var(--shadow-lg); }
   .btn-ghost { background: transparent; color: var(--text-secondary); }
   .btn-ghost:hover { background: var(--page); color: var(--text-primary); }
+  .btn-danger { background: var(--status-bad); color: #fff; border-color: var(--status-bad); }
+  .btn-danger:hover:not(:disabled) { filter: brightness(1.07); }
   .form-actions { display: flex; justify-content: flex-end; margin-top: 20px; }
   .form-actions .btn { margin-right: 0; }
+  .form-actions-split { justify-content: space-between; gap: 12px; }
 
   .nav-spacer { flex: 1; }
   .nav-logout { color: var(--text-muted); }
@@ -1194,7 +1250,14 @@ _SHARED_CSS = """<style>
   .kanban-card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
                  padding: 12px; box-shadow: var(--shadow); transition: border-color .12s ease, transform .12s ease; }
   .kanban-card:hover { border-color: var(--accent); transform: translateY(-1px); }
-  .kanban-card { cursor: grab; }
+  .kanban-card { cursor: grab; position: relative; }
+  .contact-link { padding-right: 22px; }
+  .card-del { position: absolute; top: 7px; right: 7px; width: 22px; height: 22px; border: none;
+              background: transparent; color: var(--text-muted); cursor: pointer; border-radius: 6px;
+              font-size: 17px; line-height: 1; display: flex; align-items: center; justify-content: center;
+              opacity: 0.35; transition: opacity .12s ease, background .12s ease, color .12s ease; }
+  .kanban-card:hover .card-del { opacity: 1; }
+  .card-del:hover { background: var(--status-bad-bg); color: var(--status-bad); }
   .kanban-card:active { cursor: grabbing; }
   .kanban-card.dragging { opacity: 0.45; }
   .board-col-body.drop-hover { outline: 2px dashed var(--accent); outline-offset: -4px; border-radius: 8px;
@@ -1790,9 +1853,11 @@ def _panel_sections():
         if deliv != "pendente":
             reason = f'<div class="kanban-error">{_e(err)}</div>' if (deliv == "falhou" and err) else ""
             foot = f'<div class="kanban-foot">{_delivery_chip(deliv, err if deliv == "falhou" else None)}</div>{reason}'
+        nome = lead.get('nome') or T('(sem nome)')
         return f"""
         <div class="kanban-card" draggable="true" data-phone="{_e(phone)}" data-search="{haystack}">
-          <a class="contact-link" draggable="false" href="/contato/{_e(phone)}">{_e(lead.get('nome') or T('(sem nome)'))}</a>
+          <button class="card-del" type="button" draggable="false" data-phone="{_e(phone)}" data-name="{_e(nome)}" title="{T('Excluir')}">&times;</button>
+          <a class="contact-link" draggable="false" href="/contato/{_e(phone)}">{_e(nome)}</a>
           <div class="row-tags">{chips}</div>
           <div class="kanban-phone">{_e(phone)}</div>
           {email_line}
@@ -1837,7 +1902,7 @@ def _panel_sections():
   <section><h2>{T("Envios por dia")}</h2>{_daily_sends_chart()}</section>
   <section><h2>{T("Leads quentes ({n})", n=len(hot))}</h2>{cards}</section>
   <section><h2>{T("Contatos por status ({n})", n=len(leads))}</h2>{board_section}</section>
-  """ + _INFO_MODAL_HTML + _deliv_modal_html()
+  """ + _INFO_MODAL_HTML + _deliv_modal_html() + _confirm_del_modal_html()
 
 
 def _render_panel_html():

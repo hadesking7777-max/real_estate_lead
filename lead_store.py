@@ -265,6 +265,17 @@ def import_contacts(contacts):
     return imported, skipped
 
 
+def delete_lead(phone):
+    """Remove a contact and everything attached to it. Returns True if it existed."""
+    _ensure_init()
+    with _conn() as conn:
+        existed = conn.execute("DELETE FROM leads WHERE phone=?", (phone,)).rowcount > 0
+        for tbl in ("history", "tags", "notes", "sends", "state_log"):
+            conn.execute(f"DELETE FROM {tbl} WHERE phone=?", (phone,))
+        conn.commit()
+        return existed
+
+
 def update_lead(phone, **fields):
     _ensure_init()
     with _conn() as conn:
