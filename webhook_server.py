@@ -1480,6 +1480,7 @@ def _render_contact(lead):
   <section>
     <div class="panel-box combined-grid">
       <div class="combined-cell">
+        <h2>{T("Contato")}</h2>
         <div class="contact-header">
           <div>
             <div class="contact-name">{_e(lead["nome"] or T("(sem nome)"))}</div>
