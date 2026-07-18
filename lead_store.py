@@ -29,13 +29,14 @@ _DELIVERY_RANK = {s: i for i, s in enumerate(DELIVERY_STATES)}
 SIGNAL_KEYS = ["objetivo", "experiencia", "forma_pagamento", "quantidade_unidades", "timing"]
 
 # Columns update_lead is allowed to write directly (signals handled separately; phone is the key).
-_WRITABLE_COLS = ["nome", "perfil", "origem", "pais", "stage", "delivery",
+_WRITABLE_COLS = ["nome", "email", "perfil", "origem", "pais", "stage", "delivery",
                   "last_template_used", "last_wamid", "followup_count", "last_send_ts"]
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS leads (
   phone TEXT PRIMARY KEY,
   nome TEXT,
+  email TEXT,
   perfil TEXT,
   origem TEXT,
   pais TEXT,
@@ -127,6 +128,8 @@ def _migrate_schema(conn):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(leads)")}
     if "last_send_ts" not in cols:
         conn.execute("ALTER TABLE leads ADD COLUMN last_send_ts REAL")
+    if "email" not in cols:
+        conn.execute("ALTER TABLE leads ADD COLUMN email TEXT")
     camp_cols = {r["name"] for r in conn.execute("PRAGMA table_info(campaign)")}
     if "manual_remaining" not in camp_cols:
         conn.execute("ALTER TABLE campaign ADD COLUMN manual_remaining INTEGER DEFAULT 0")
@@ -160,10 +163,10 @@ def _maybe_migrate_json():
 
 def _insert_row(conn, phone, lead):
     conn.execute(
-        "INSERT OR IGNORE INTO leads(phone,nome,perfil,origem,pais,stage,delivery,"
-        "signals,last_template_used,last_wamid,followup_count) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT OR IGNORE INTO leads(phone,nome,email,perfil,origem,pais,stage,delivery,"
+        "signals,last_template_used,last_wamid,followup_count) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            phone, lead.get("nome", ""), lead.get("perfil", "PF"),
+            phone, lead.get("nome", ""), lead.get("email", ""), lead.get("perfil", "PF"),
             lead.get("origem", "Brasil"), lead.get("pais", "Brasil"),
             lead.get("stage", "pendente"), lead.get("delivery", "pendente"),
             json.dumps(lead.get("signals") or _empty_signals()),
@@ -177,6 +180,7 @@ def _row_to_lead(conn, row, with_history=True):
     lead = {
         "phone": row["phone"],
         "nome": row["nome"] or "",
+        "email": (row["email"] if "email" in row.keys() else "") or "",
         "perfil": row["perfil"] or "PF",
         "origem": row["origem"] or "Brasil",
         "pais": row["pais"] or "Brasil",
@@ -224,11 +228,17 @@ def import_contacts(contacts):
     with _conn() as conn:
         for c in contacts:
             phone = _digits(c["telefone_e164"])
-            if conn.execute("SELECT 1 FROM leads WHERE phone=?", (phone,)).fetchone():
+            existing = conn.execute("SELECT email FROM leads WHERE phone=?", (phone,)).fetchone()
+            if existing:
+                # already a contact: keep it as-is, but backfill a missing email
+                # so re-importing the same sheet fills emails without duplicating.
+                if not (existing["email"] or "").strip() and c.get("email"):
+                    conn.execute("UPDATE leads SET email=? WHERE phone=?", (c.get("email", ""), phone))
                 skipped += 1
                 continue
             _insert_row(conn, phone, {
                 "nome": c.get("nome", ""),
+                "email": c.get("email", ""),
                 "perfil": "PJ" if str(c.get("perfil", "")).startswith("PJ") else "PF",
                 "origem": c.get("origem", "Brasil"),
                 "pais": c.get("pais", "Brasil"),

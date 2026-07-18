@@ -20,13 +20,14 @@ Give Lucas the same public URL + /painel, plus PANEL_USER/PANEL_PASSWORD.
 
 import hashlib
 import html
+import json
 import os
 import time
 import uuid
 from datetime import datetime, timedelta
 from functools import wraps
 
-from flask import Flask, request, jsonify, redirect, session, Response, stream_with_context
+from flask import Flask, request, jsonify, redirect, session, Response, stream_with_context, g
 from werkzeug.security import generate_password_hash, check_password_hash
 
 import lead_store
@@ -36,6 +37,9 @@ import base_import
 import run_history
 import scheduler
 import events
+import i18n
+from i18n import T
+import logo_assets
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8 MB cap on uploads
@@ -51,6 +55,23 @@ app.permanent_session_lifetime = timedelta(days=7)
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+@app.before_request
+def _set_ui_lang():
+    lang = request.cookies.get("ui_lang")
+    g.ui_lang = lang if lang in i18n.LANGS else i18n.DEFAULT
+
+
+@app.route("/idioma/<lang>")
+def set_idioma(lang):
+    # switch the UI language (stored in a cookie); works before login too, so the
+    # login screen can be switched. Redirects back to wherever the user came from.
+    nxt = _safe_next(request.args.get("next") or request.referrer or "/painel")
+    resp = redirect(nxt)
+    if lang in i18n.LANGS:
+        resp.set_cookie("ui_lang", lang, max_age=60 * 60 * 24 * 365, samesite="Lax")
+    return resp
 
 STAGE_LABELS = {
     "pendente": "Pendentes",
@@ -119,7 +140,7 @@ def login_post():
         session.permanent = True
         session["auth"] = True
         return redirect(nxt)
-    return _render_login(error="Usuario ou senha invalidos.", next_url=nxt), 401
+    return _render_login(error=T("Usuario ou senha invalidos."), next_url=nxt), 401
 
 
 @app.route("/logout")
@@ -259,7 +280,7 @@ def importar_historico():
 def importar_analisar():
     file = request.files.get("arquivo")
     if not file or not file.filename.lower().endswith(".xlsx"):
-        return _render_import_form(erro="Envie um arquivo .xlsx valido."), 400
+        return _render_import_form(erro=T("Envie um arquivo .xlsx valido.")), 400
     token = uuid.uuid4().hex
     path = os.path.join(UPLOAD_DIR, f"{token}.xlsx")
     file.save(path)
@@ -267,7 +288,7 @@ def importar_analisar():
         analysis = base_import.analyze(path)
     except Exception as exc:  # noqa: BLE001 - surface any parse error to the user
         os.remove(path)
-        return _render_import_form(erro=f"Nao consegui ler a planilha: {exc}"), 400
+        return _render_import_form(erro=T("Nao consegui ler a planilha: {exc}", exc=exc)), 400
     run_history.record(
         "Analise",
         f"{file.filename}: {analysis['total_rows']} linhas, {len(analysis['clean'])} BR, "
@@ -307,9 +328,9 @@ def campanha_status():
 def contato(phone):
     lead = lead_store.get_lead(phone)
     if not lead:
-        return _page("Contato", "Contato nao encontrado", "painel",
-                     '<section><div class="empty-state">Contato nao encontrado.</div>'
-                     '<p><a class="btn btn-ghost" href="/painel">Voltar</a></p></section>'), 404
+        return _page(T("Contato"), T("Contato nao encontrado"), "painel",
+                     f'<section><div class="empty-state">{T("Contato nao encontrado.")}</div>'
+                     f'<p><a class="btn btn-ghost" href="/painel">{T("Voltar")}</a></p></section>'), 404
     return _render_contact(lead)
 
 
@@ -350,7 +371,7 @@ def importar_confirmar():
     include_intl = request.form.get("incluir_intl") == "sim"
     path = os.path.join(UPLOAD_DIR, os.path.basename(token) + ".xlsx")
     if not (token and os.path.exists(path)):
-        return _render_import_form(erro="Sessao de upload expirou, envie a planilha de novo."), 400
+        return _render_import_form(erro=T("Sessao de upload expirou, envie a planilha de novo.")), 400
     analysis = base_import.analyze(path)
     contacts = list(analysis["clean"])
     if include_intl:
@@ -458,7 +479,31 @@ _LIVE_JS = """
 </script>"""
 
 
-_BOARD_JS = """
+# State/rate explanation popups. Titles reuse the shared labels; descriptions are
+# translated per current language. Built per request so it follows the UI language.
+_STATE_INFO_SRC = {
+    "campanha": ("Campanha", "Controle manual do envio. Voce escolhe quantos contatos disparar agora e clica em Enviar agora. Pode repetir quantas vezes quiser. Os envios saem espacados automaticamente para proteger o numero."),
+    "pendente": ("Pendentes", "Contatos que ainda nao receberam nenhuma mensagem. Estao na fila para o primeiro contato quando a campanha rodar."),
+    "contatado": ("Contatados", "Ja receberam a mensagem de abertura, mas ainda nao responderam. Aguardando resposta, ou entrando na cadencia de follow-up."),
+    "respondeu": ("Responderam", "Responderam a primeira mensagem. A IA comeca a qualificacao a partir daqui."),
+    "qualificando": ("Em qualificacao", "Estao conversando com a IA agora, que mede intencao, capital, forma de pagamento e timing."),
+    "quente": ("Quentes", "Leads qualificados, com alta intencao de compra. Ja entregues no seu WhatsApp para fechar."),
+    "morno": ("Morno", "Tem interesse, mas com horizonte mais longo ou capital ainda indefinido. Ficam sendo nutridos pela IA."),
+    "frio": ("Frio", "Sem interesse real no momento. Saem do fluxo ativo da campanha."),
+    "opt_out": ("Opt-out", "Pediram para nao receber mais mensagens. Removidos na hora e nunca mais contatados."),
+    "taxa_entrega": ("Taxa de entrega", "Percentual das mensagens enviadas que chegaram no aparelho do contato. Mede a qualidade da base e a saude do numero."),
+    "taxa_leitura": ("Taxa de leitura", "Percentual das mensagens enviadas que foram lidas (abertas) pelo contato."),
+    "taxa_resposta": ("Taxa de resposta", "Percentual das mensagens enviadas que geraram uma resposta. E a principal metrica de reativacao."),
+    "taxa_qualificacao": ("Taxa de qualificacao", "Dos que responderam, quantos viraram leads quentes (investidores prontos para fechar)."),
+}
+
+
+def _board_js():
+    entries = ",\n".join(
+        f"  {k}: {{t: {json.dumps(T(t))}, d: {json.dumps(T(d))}}}"
+        for k, (t, d) in _STATE_INFO_SRC.items()
+    )
+    return """
 <script>
 window.filterRows = function (q) {
   q = (q || '').toLowerCase().trim();
@@ -468,19 +513,7 @@ window.filterRows = function (q) {
   });
 };
 var STATE_INFO = {
-  campanha: {t: 'Campanha', d: 'Controle manual do envio. Voce escolhe quantos contatos disparar agora e clica em Enviar agora. Pode repetir quantas vezes quiser. Os envios saem espacados automaticamente para proteger o numero.'},
-  pendente: {t: 'Pendentes', d: 'Contatos que ainda nao receberam nenhuma mensagem. Estao na fila para o primeiro contato quando a campanha rodar.'},
-  contatado: {t: 'Contatados', d: 'Ja receberam a mensagem de abertura, mas ainda nao responderam. Aguardando resposta, ou entrando na cadencia de follow-up.'},
-  respondeu: {t: 'Responderam', d: 'Responderam a primeira mensagem. A IA comeca a qualificacao a partir daqui.'},
-  qualificando: {t: 'Em qualificacao', d: 'Estao conversando com a IA agora, que mede intencao, capital, forma de pagamento e timing.'},
-  quente: {t: 'Quentes', d: 'Leads qualificados, com alta intencao de compra. Ja entregues no seu WhatsApp para fechar.'},
-  morno: {t: 'Morno', d: 'Tem interesse, mas com horizonte mais longo ou capital ainda indefinido. Ficam sendo nutridos pela IA.'},
-  frio: {t: 'Frio', d: 'Sem interesse real no momento. Saem do fluxo ativo da campanha.'},
-  opt_out: {t: 'Opt-out', d: 'Pediram para nao receber mais mensagens. Removidos na hora e nunca mais contatados.'},
-  taxa_entrega: {t: 'Taxa de entrega', d: 'Percentual das mensagens enviadas que chegaram no aparelho do contato. Mede a qualidade da base e a saude do numero.'},
-  taxa_leitura: {t: 'Taxa de leitura', d: 'Percentual das mensagens enviadas que foram lidas (abertas) pelo contato.'},
-  taxa_resposta: {t: 'Taxa de resposta', d: 'Percentual das mensagens enviadas que geraram uma resposta. E a principal metrica de reativacao.'},
-  taxa_qualificacao: {t: 'Taxa de qualificacao', d: 'Dos que responderam, quantos viraram leads quentes (investidores prontos para fechar).'}
+""" + entries + """
 };
 window.showState = function (k) {
   var info = STATE_INFO[k]; if (!info) return;
@@ -516,8 +549,19 @@ _IMPORT_LIVE_JS = """
 })();
 </script>"""
 
-_IMPORT_JS = """
-<script>
+def _import_js():
+    L = {
+        "analyze": T("Analisar planilha"),
+        "uploading": T("Enviando"),
+        "analyzing": T("Analisando"),
+        "notXlsx": T("Esse arquivo nao e .xlsx. Envie uma planilha do Excel."),
+        "uploadErr": T("Erro no envio ({s}). Tente de novo."),
+        "connErr": T("Falha de conexao no envio. Tente de novo."),
+    }
+    return "<script>\nvar IMPL = " + json.dumps(L) + ";\n" + _IMPORT_JS_BODY + "\n</script>"
+
+
+_IMPORT_JS_BODY = """
 (function () {
   var input = document.getElementById('file-input');
   var dz = document.getElementById('dropzone');
@@ -545,14 +589,14 @@ _IMPORT_JS = """
     selected = null; input.value = '';
     card.hidden = true; errEl.hidden = true;
     progWrap.hidden = true; progBar.style.width = '0%'; if (progPct) progPct.textContent = '';
-    submit.disabled = true; submit.textContent = 'Analisar planilha'; submit.classList.remove('loading');
+    submit.disabled = true; submit.textContent = IMPL.analyze; submit.classList.remove('loading');
     dz.hidden = false;
   }
   window.cancelUpload = reset;
 
   function chooseFile(f) {
     if (!f.name.toLowerCase().endsWith('.xlsx')) {
-      errEl.textContent = 'Esse arquivo nao e .xlsx. Envie uma planilha do Excel.';
+      errEl.textContent = IMPL.notXlsx;
       errEl.hidden = false; input.value = '';
       return;
     }
@@ -581,7 +625,7 @@ _IMPORT_JS = """
   function failMsg(msg) {
     errEl.textContent = msg; errEl.hidden = false;
     progWrap.hidden = true;
-    submit.disabled = false; submit.classList.remove('loading'); submit.textContent = 'Analisar planilha';
+    submit.disabled = false; submit.classList.remove('loading'); submit.textContent = IMPL.analyze;
     xhr = null;
   }
 
@@ -592,28 +636,27 @@ _IMPORT_JS = """
     fd.append('arquivo', selected, selected.name);
     xhr = new XMLHttpRequest();
     xhr.open('POST', '/importar/analisar');
-    submit.disabled = true; submit.classList.add('loading'); submit.textContent = 'Enviando';
+    submit.disabled = true; submit.classList.add('loading'); submit.textContent = IMPL.uploading;
     progWrap.hidden = false; progBar.style.width = '0%';
     xhr.upload.onprogress = function (ev) {
       if (ev.lengthComputable) {
         var pct = Math.round(ev.loaded / ev.total * 100);
         progBar.style.width = pct + '%';
         if (progPct) progPct.textContent = pct + '%';
-        if (pct >= 100) submit.textContent = 'Analisando';
+        if (pct >= 100) submit.textContent = IMPL.analyzing;
       }
     };
     xhr.onload = function () {
       if (xhr.status === 200) {
         document.open(); document.write(xhr.responseText); document.close();
       } else {
-        failMsg('Erro no envio (' + xhr.status + '). Tente de novo.');
+        failMsg(IMPL.uploadErr.replace('{s}', xhr.status));
       }
     };
-    xhr.onerror = function () { failMsg('Falha de conexao no envio. Tente de novo.'); };
+    xhr.onerror = function () { failMsg(IMPL.connErr); };
     xhr.send(fd);
   });
 })();
-</script>
 """
 
 _SHARED_CSS = """<style>
@@ -673,6 +716,8 @@ _SHARED_CSS = """<style>
   .brand { width: 40px; height: 40px; border-radius: 11px; background: rgba(255,255,255,0.14);
            display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 15px;
            letter-spacing: 0.5px; border: 1px solid rgba(255,255,255,0.20); flex-shrink: 0; }
+  .brand-logo { height: 42px; width: auto; border-radius: 10px; display: block; flex-shrink: 0;
+                background: rgba(255,255,255,0.10); padding: 3px 6px; border: 1px solid rgba(255,255,255,0.18); }
   .header-text h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.2px; }
   .header-text p { margin: 3px 0 0; font-size: 13px; opacity: 0.82; }
   .nav { background: var(--nav-bg); border-bottom: 1px solid var(--border);
@@ -713,11 +758,11 @@ _SHARED_CSS = """<style>
   .col-x { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
 
   .funnel { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; box-shadow: var(--shadow); }
-  .funnel-row { display: grid; grid-template-columns: 130px 1fr 150px; align-items: center; gap: 12px; padding: 8px 0; }
+  .funnel-row { display: grid; grid-template-columns: 130px 1fr 240px; align-items: center; gap: 12px; padding: 8px 0; }
   .funnel-label { font-size: 13px; color: var(--text-secondary); font-weight: 500; }
   .funnel-track { background: var(--page); border-radius: 5px; height: 16px; overflow: hidden; }
   .funnel-bar { height: 100%; border-radius: 5px; min-width: 5px; transition: width .5s cubic-bezier(.4,0,.2,1); }
-  .funnel-value { font-size: 13px; color: var(--text-primary); font-weight: 600; text-align: right; }
+  .funnel-value { font-size: 13px; color: var(--text-primary); font-weight: 600; text-align: right; white-space: nowrap; }
   .funnel-pct { font-size: 12px; color: var(--text-muted); font-weight: 400; }
 
   .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px 20px; margin-bottom: 12px; box-shadow: var(--shadow); }
@@ -783,6 +828,7 @@ _SHARED_CSS = """<style>
   .login-brand { width: 48px; height: 48px; border-radius: 13px; background: var(--accent); color: #fff;
                  display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 18px;
                  letter-spacing: 0.5px; margin: 0 auto 14px; }
+  .login-logo { height: 58px; width: auto; display: block; margin: 0 auto 16px; border-radius: 12px; }
   .login-title { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
   .login-sub { margin: 4px 0 22px; font-size: 13px; color: var(--text-muted); }
   .login-label { display: block; text-align: left; font-size: 12px; color: var(--text-secondary);
@@ -872,6 +918,7 @@ _SHARED_CSS = """<style>
                  padding: 12px; box-shadow: var(--shadow); transition: border-color .12s ease, transform .12s ease; }
   .kanban-card:hover { border-color: var(--accent); transform: translateY(-1px); }
   .kanban-phone { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; margin-top: 4px; }
+  .kanban-email { font-size: 12px; color: var(--text-muted); margin-top: 2px; word-break: break-all; }
   .kanban-foot { margin-top: 8px; }
   .board-empty { color: var(--text-muted); font-size: 12px; text-align: center; padding: 16px 8px; }
 
@@ -914,6 +961,11 @@ _SHARED_CSS = """<style>
                   color: var(--text-primary); font-size: 13px; padding: 9px 10px; border-radius: 7px;
                   cursor: pointer; text-decoration: none; }
   .account-item:hover { background: var(--page); }
+  .account-divider { height: 1px; background: var(--border); margin: 6px 4px; }
+  .account-sub-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px;
+                       color: var(--text-muted); padding: 8px 10px 3px; }
+  .lang-item { display: flex; justify-content: space-between; align-items: center; }
+  .lang-item.lang-active { color: var(--accent); font-weight: 600; }
   .pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 14px; }
   .pager-info { font-size: 13px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
   .pager .btn { margin: 0; }
@@ -968,7 +1020,7 @@ _DELIVERY_CHIP = {
 
 def _delivery_chip(state):
     cls = _DELIVERY_CHIP.get(state, "chip-muted")
-    return f'<span class="chip {cls}">{DELIVERY_LABELS.get(state, state)}</span>'
+    return f'<span class="chip {cls}">{T(DELIVERY_LABELS.get(state, state))}</span>'
 
 
 _NAV_ICON_FUNNEL = (
@@ -983,6 +1035,18 @@ _NAV_ICON_IMPORT = (
     '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
     '<polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>'
 )
+def _lang_menu():
+    cur = i18n.current()
+    nxt = _e(request.path if request else "/painel")
+    rows = ""
+    for code in i18n.LANGS:
+        mark = ' &#10003;' if code == cur else ''
+        active = ' lang-active' if code == cur else ''
+        rows += (f'<a class="account-item lang-item{active}" href="/idioma/{code}?next={nxt}">'
+                 f'{_e(i18n.LANG_NAMES[code])}{mark}</a>')
+    return (f'<div class="account-sub-label">{T("Idioma")}</div>{rows}')
+
+
 def _nav(active):
     def item(href, label, key, icon):
         cls = "nav-item active" if key == active else "nav-item"
@@ -995,34 +1059,41 @@ def _nav(active):
         f'<span class="account-name">{_e(PANEL_USER)}</span>'
         '<span class="account-caret">&#9662;</span></button>'
         '<div class="account-menu" id="account-menu" hidden>'
-        '<button class="account-item" type="button" onclick="openPwd()">Trocar senha</button>'
-        '<a class="account-item" href="/logout">Sair</a>'
+        f'<button class="account-item" type="button" onclick="openPwd()">{T("Trocar senha")}</button>'
+        + _lang_menu()
+        + '<div class="account-divider"></div>'
+        f'<a class="account-item" href="/logout">{T("Sair")}</a>'
         '</div></div>'
     )
     return ('<nav class="nav"><div class="nav-inner">'
-            + item("/painel", "Painel", "painel", _NAV_ICON_FUNNEL)
-            + item("/importar", "Importar base", "importar", _NAV_ICON_IMPORT)
+            + item("/painel", T("Painel"), "painel", _NAV_ICON_FUNNEL)
+            + item("/importar", T("Importar base"), "importar", _NAV_ICON_IMPORT)
             + '<span class="nav-spacer"></span>'
             + account
             + "</div></nav>")
 
 
-_ACCOUNT_HTML = """
+def _account_html():
+    return f"""
   <div id="pwd-modal" class="modal-overlay" hidden onclick="if(event.target===this)closePwd()">
     <div class="modal-card">
-      <div class="modal-head"><span class="modal-title">Trocar senha</span>
+      <div class="modal-head"><span class="modal-title">{T("Trocar senha")}</span>
         <button class="modal-close" type="button" onclick="closePwd()">&times;</button></div>
       <form method="post" action="/conta/senha">
-        <label class="modal-label">Senha atual</label>
+        <label class="modal-label">{T("Senha atual")}</label>
         <input class="modal-input" type="password" name="atual" required autocomplete="current-password">
-        <label class="modal-label">Nova senha (minimo 6 caracteres)</label>
+        <label class="modal-label">{T("Nova senha (minimo 6 caracteres)")}</label>
         <input class="modal-input" type="password" name="nova" required minlength="6" autocomplete="new-password">
-        <label class="modal-label">Confirmar nova senha</label>
+        <label class="modal-label">{T("Confirmar nova senha")}</label>
         <input class="modal-input" type="password" name="confirma" required minlength="6" autocomplete="new-password">
-        <div class="form-actions"><button class="btn btn-primary" type="submit">Salvar</button></div>
+        <div class="form-actions"><button class="btn btn-primary" type="submit">{T("Salvar")}</button></div>
       </form>
     </div>
   </div>
+""" + _ACCOUNT_JS
+
+
+_ACCOUNT_JS = """
 <script>
 window.toggleAccount = function (e) { if (e) e.stopPropagation();
   var m = document.getElementById('account-menu'); if (m) m.hidden = !m.hidden; };
@@ -1037,44 +1108,49 @@ document.addEventListener('keydown', function (e) { if (e.key === 'Escape') wind
 </script>"""
 
 
+_FAVICON_TAG = f'<link rel="icon" type="image/png" href="{logo_assets.FAVICON_URI}">'
+
+
 def _render_login(error=None, next_url="/painel"):
     err = f'<div class="login-error">{_e(error)}</div>' if error else ""
     return (
-        '<!doctype html><html lang="pt-br"><head>'
+        f'<!doctype html><html lang="{i18n.html_lang()}"><head>'
         '<meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        '<title>Entrar &middot; Guerra Cyrela</title>'
+        f'<title>{T("Entrar")} &middot; Guerra Cyrela</title>'
+        + _FAVICON_TAG
         + _SHARED_CSS
         + '</head><body class="login-body"><div class="login-card">'
-        '<div class="login-brand">GC</div>'
+        f'<img class="login-logo" src="{logo_assets.LOGO_URI}" alt="Guerra Cyrela">'
         '<h1 class="login-title">Guerra Cyrela</h1>'
-        '<p class="login-sub">Painel de reativacao</p>'
+        f'<p class="login-sub">{T("Painel de reativacao")}</p>'
         + err
         + '<form method="post" action="/login">'
         f'<input type="hidden" name="next" value="{_e(next_url)}">'
-        '<label class="login-label">Usuario</label>'
+        f'<label class="login-label">{T("Usuario")}</label>'
         '<input class="login-input" type="text" name="usuario" autocomplete="username" autofocus required>'
-        '<label class="login-label">Senha</label>'
+        f'<label class="login-label">{T("Senha")}</label>'
         '<input class="login-input" type="password" name="senha" autocomplete="current-password" required>'
-        '<button class="btn btn-primary login-btn" type="submit">Entrar</button>'
+        f'<button class="btn btn-primary login-btn" type="submit">{T("Entrar")}</button>'
         '</form></div></body></html>'
     )
 
 
 def _page(title, subtitle, active, body):
     return (
-        '<!doctype html><html lang="pt-br"><head>'
+        f'<!doctype html><html lang="{i18n.html_lang()}"><head>'
         '<meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<title>{_e(title)}</title>"
+        + _FAVICON_TAG
         + _SHARED_CSS
         + "</head><body>"
-        '<header><div class="header-inner"><div class="brand">GC</div>'
+        f'<header><div class="header-inner"><img class="brand-logo" src="{logo_assets.LOGO_URI}" alt="Guerra Cyrela">'
         '<div class="header-text"><h1>Guerra Cyrela &middot; Faria Lima</h1>'
         f'<p>{_e(subtitle)}</p></div></div></header>'
         + _nav(active)
         + f"<main>{body}</main>"
-        + _ACCOUNT_HTML
+        + _account_html()
         + "</body></html>"
     )
 
@@ -1115,23 +1191,23 @@ def _auto_tags(lead):
 
 def _timeline_html(lead):
     items = ""
-    kind_labels = {"opener": "Abertura enviada", "followup1": "Follow-up 1 enviado",
-                   "followup2": "Follow-up 2 enviado", "template": "Mensagem enviada"}
+    kind_labels = {"opener": T("Abertura enviada"), "followup1": T("Follow-up 1 enviado"),
+                   "followup2": T("Follow-up 2 enviado"), "template": T("Mensagem enviada")}
     for h in lead["history"]:
         role, text = h["role"], (h["text"] or "")
         if role == "bot" and text.startswith("["):
             inner = text.strip("[]")
             kind = inner.split(":")[0]
             tmpl = inner.split(":", 1)[1] if ":" in inner else ""
-            items += (f'<div class="tl-system">{kind_labels.get(kind, "Mensagem enviada")}'
+            items += (f'<div class="tl-system">{kind_labels.get(kind, T("Mensagem enviada"))}'
                       f'<span class="tl-tmpl">{_e(tmpl)}</span></div>')
         elif role == "lead":
-            items += (f'<div class="tl-msg tl-in"><div class="tl-who">Investidor</div>'
+            items += (f'<div class="tl-msg tl-in"><div class="tl-who">{T("Investidor")}</div>'
                       f'<div class="tl-bubble">{_e(text)}</div></div>')
         else:
-            items += (f'<div class="tl-msg tl-out"><div class="tl-who">Assistente</div>'
+            items += (f'<div class="tl-msg tl-out"><div class="tl-who">{T("Assistente")}</div>'
                       f'<div class="tl-bubble">{_e(text)}</div></div>')
-    return items or '<div class="empty-state">Nenhuma mensagem ainda.</div>'
+    return items or f'<div class="empty-state">{T("Nenhuma mensagem ainda.")}</div>'
 
 
 def _render_contact(lead):
@@ -1145,16 +1221,16 @@ def _render_contact(lead):
     manual_chips = "".join(
         f'<span class="tag-chip">{_e(t)}'
         f'<form method="post" action="/contato/{_e(phone)}/tag/remover" class="tag-x">'
-        f'<input type="hidden" name="tag" value="{_e(t)}"><button type="submit" title="Remover">&times;</button></form>'
+        f'<input type="hidden" name="tag" value="{_e(t)}"><button type="submit" title="{T("Remover")}">&times;</button></form>'
         f"</span>" for t in manual
-    ) or '<span class="muted-text">Nenhuma tag manual.</span>'
+    ) or f'<span class="muted-text">{T("Nenhuma tag manual.")}</span>'
 
     stage_opts = "".join(
-        f'<option value="{sk}"{" selected" if lead["stage"] == sk else ""}>{_e(STAGE_LABELS.get(sk, sk))}</option>'
+        f'<option value="{sk}"{" selected" if lead["stage"] == sk else ""}>{_e(T(STAGE_LABELS.get(sk, sk)))}</option>'
         for sk in lead_store.STAGES
     )
     signals_html = "".join(
-        f'<div><span class="signal-label">{lbl}</span>{_e(s.get(k) or "-")}</div>'
+        f'<div><span class="signal-label">{T(lbl)}</span>{_e(s.get(k) or "-")}</div>'
         for k, lbl in [("objetivo", "Objetivo"), ("experiencia", "Experiencia"),
                        ("forma_pagamento", "Forma de pagamento"),
                        ("quantidade_unidades", "Unidades"), ("timing", "Timing")]
@@ -1162,68 +1238,68 @@ def _render_contact(lead):
     notes_list = "".join(
         f'<div class="note-item"><span class="note-when">{_fmt_ts(n["ts"])}</span>'
         f'<span>{_e(n["text"])}</span></div>' for n in notes
-    ) or '<div class="empty-state">Nenhuma nota ainda.</div>'
+    ) or f'<div class="empty-state">{T("Nenhuma nota ainda.")}</div>'
 
     body = f"""
-  <a class="back-link" href="/painel">&larr; Voltar ao painel</a>
+  <a class="back-link" href="/painel">&larr; {T("Voltar ao painel")}</a>
   <section>
     <div class="contact-header">
       <div>
-        <div class="contact-name">{_e(lead["nome"] or "(sem nome)")}</div>
-        <div class="contact-sub">{_e(phone)} &middot; {_e(lead["pais"] or lead["origem"])}</div>
+        <div class="contact-name">{_e(lead["nome"] or T("(sem nome)"))}</div>
+        <div class="contact-sub">{_e(phone)} &middot; {_e(lead["pais"] or lead["origem"])}{f' &middot; {_e(lead["email"])}' if lead.get("email") else ""}</div>
       </div>
       <div class="contact-chips">
         <span class="chip chip-muted">{_e(lead["perfil"])}</span>
-        <span class="chip chip-info">{_e(STAGE_LABELS.get(lead["stage"], lead["stage"]))}</span>
+        <span class="chip chip-info">{_e(T(STAGE_LABELS.get(lead["stage"], lead["stage"])))}</span>
         {_delivery_chip(lead.get("delivery", "pendente"))}
-        <a class="btn btn-primary" href="https://wa.me/{_e(phone)}" target="_blank" rel="noopener">Abrir no WhatsApp</a>
+        <a class="btn btn-primary" href="https://wa.me/{_e(phone)}" target="_blank" rel="noopener">{T("Abrir no WhatsApp")}</a>
       </div>
     </div>
   </section>
 
   <section>
-    <h2>Tags</h2>
+    <h2>{T("Tags")}</h2>
     <div class="panel-box">
-      <div class="tag-group"><span class="tag-group-label">Automaticas</span>{auto_chips}</div>
-      <div class="tag-group"><span class="tag-group-label">Manuais</span>{manual_chips}</div>
+      <div class="tag-group"><span class="tag-group-label">{T("Automaticas")}</span>{auto_chips}</div>
+      <div class="tag-group"><span class="tag-group-label">{T("Manuais")}</span>{manual_chips}</div>
       <form method="post" action="/contato/{_e(phone)}/tag" class="inline-form">
-        <input class="search inline-input" type="text" name="tag" placeholder="Nova tag..." maxlength="40" required>
-        <button class="btn btn-ghost" type="submit">Adicionar</button>
+        <input class="search inline-input" type="text" name="tag" placeholder="{T("Nova tag...")}" maxlength="40" required>
+        <button class="btn btn-ghost" type="submit">{T("Adicionar")}</button>
       </form>
     </div>
   </section>
 
   <section>
-    <h2>Etapa</h2>
+    <h2>{T("Etapa")}</h2>
     <div class="panel-box">
       <form method="post" action="/contato/{_e(phone)}/etapa" class="inline-form">
         <select class="select" name="stage">{stage_opts}</select>
-        <button class="btn btn-ghost" type="submit">Atualizar etapa</button>
+        <button class="btn btn-ghost" type="submit">{T("Atualizar etapa")}</button>
       </form>
     </div>
   </section>
 
   <section>
-    <h2>Sinais de qualificacao</h2>
+    <h2>{T("Sinais de qualificacao")}</h2>
     <div class="panel-box"><div class="signals">{signals_html}</div></div>
   </section>
 
   <section>
-    <h2>Notas</h2>
+    <h2>{T("Notas")}</h2>
     <div class="panel-box">
       <form method="post" action="/contato/{_e(phone)}/nota" class="inline-form">
-        <input class="search inline-input" type="text" name="nota" placeholder="Escrever uma nota..." maxlength="300" required>
-        <button class="btn btn-ghost" type="submit">Adicionar nota</button>
+        <input class="search inline-input" type="text" name="nota" placeholder="{T("Escrever uma nota...")}" maxlength="300" required>
+        <button class="btn btn-ghost" type="submit">{T("Adicionar nota")}</button>
       </form>
       <div class="notes-list">{notes_list}</div>
     </div>
   </section>
 
   <section>
-    <h2>Conversa</h2>
+    <h2>{T("Conversa")}</h2>
     <div class="timeline">{_timeline_html(lead)}</div>
   </section>"""
-    return _page(lead["nome"] or phone, "Detalhe do contato", "painel", body)
+    return _page(lead["nome"] or phone, T("Detalhe do contato"), "painel", body)
 
 
 def _fmt_day(day_ts):
@@ -1233,8 +1309,9 @@ def _fmt_day(day_ts):
 def _daily_sends_chart():
     data = lead_store.sends_by_day()
     if not data:
-        return ('<div class="empty-state">Nenhum envio ainda. O grafico aparece aqui '
-                'quando a campanha comecar a enviar.</div>')
+        return ('<div class="empty-state">'
+                + T("Nenhum envio ainda. O grafico aparece aqui quando a campanha comecar a enviar.")
+                + '</div>')
     maxv = max(v for _, v in data) or 1
     cols = ""
     for day_ts, v in data:
@@ -1249,28 +1326,29 @@ def _render_campaign():
     s = scheduler.status_summary()
     sending = s["status"] == "running" and s["remaining"] > 0
     if sending:
-        chip, label = "chip-good", f"Enviando &middot; faltam {s['remaining']}"
+        chip, label = "chip-good", T("Enviando &middot; faltam {n}", n=s["remaining"])
     elif s["status"] == "paused":
-        chip, label = "chip-info", "Pausada"
+        chip, label = "chip-info", T("Pausada")
     else:
-        chip, label = "chip-muted", "Parada"
+        chip, label = "chip-muted", T("Parada")
     warn = ""
     if s["status"] == "paused" and s["fail_streak"] >= scheduler.MAX_FAIL_STREAK:
-        warn = ('<div class="alert alert-bad">Envio pausado automaticamente apos varias falhas seguidas. '
-                'Confirme os modelos aprovados e o token antes de enviar de novo.</div>')
-    metrics = (f'Total enviados {s["total_enviados"]} &middot; Pendentes {s["pendentes"]}')
+        warn = ('<div class="alert alert-bad">'
+                + T("Envio pausado automaticamente apos varias falhas seguidas. Confirme os modelos aprovados e o token antes de enviar de novo.")
+                + '</div>')
+    metrics = T("Total enviados {a} &middot; Pendentes {b}", a=s["total_enviados"], b=s["pendentes"])
     # while sending, show a stop button; otherwise the manual "send N" form
     if sending:
         control = ('<form method="post" action="/campanha/parar">'
-                   '<button class="btn btn-ghost" type="submit">Parar envio</button></form>')
+                   f'<button class="btn btn-ghost" type="submit">{T("Parar envio")}</button></form>')
     else:
         maxq = max(s["pendentes"], 1)
         default_q = min(20, maxq)
         control = (
             '<form method="post" action="/campanha/enviar" class="send-form">'
             f'<input class="qty-input" type="number" name="quantidade" min="1" max="{maxq}" '
-            f'value="{default_q}" title="Quantos contatos enviar agora">'
-            '<button class="btn btn-primary" type="submit">Enviar agora</button>'
+            f'value="{default_q}" title="{T("Quantos contatos enviar agora")}">'
+            f'<button class="btn btn-primary" type="submit">{T("Enviar agora")}</button>'
             '</form>')
     progress = ""
     if sending and s["total"]:
@@ -1279,7 +1357,7 @@ def _render_campaign():
                     f'style="width:{pct}%"></div></div>')
     return f"""
   <section>
-    <h2>Campanha{_info_btn('campanha')}</h2>
+    <h2>{T("Campanha")}{_info_btn('campanha')}</h2>
     {warn}
     <div class="campaign-box" id="campaign-box" data-sending="{'1' if sending else '0'}">
       <div class="campaign-top">
@@ -1308,10 +1386,10 @@ def _panel_sections():
         c = counts.get(key, 0)
         width_pct = (c / total * 100) if total else 0
         color = ramp_steps[min(i, len(ramp_steps) - 1)]
-        conv = f" &middot; {_fmt_pct(c, prev_count)} da etapa anterior" if i > 0 else ""
+        conv = T(" &middot; {p} da etapa anterior", p=_fmt_pct(c, prev_count)) if i > 0 else ""
         funnel_rows += f"""
         <div class="funnel-row">
-          <div class="funnel-label">{label}{_info_btn(key)}</div>
+          <div class="funnel-label">{T(label)}{_info_btn(key)}</div>
           <div class="funnel-track"><div class="funnel-bar" style="width:{max(width_pct, 2):.1f}%; background:{color}"></div></div>
           <div class="funnel-value">{c} <span class="funnel-pct">({_fmt_pct(c, total)}{conv})</span></div>
         </div>"""
@@ -1325,7 +1403,7 @@ def _panel_sections():
     quente_n = counts.get("quente", 0)
     rate_tiles = "".join(
         f'<div class="tile"><div class="tile-num">{_fmt_pct(n, d)}</div>'
-        f'<div class="tile-label">{lbl}{_info_btn(key)}</div><div class="tile-sub">{n} de {d}</div></div>'
+        f'<div class="tile-label">{T(lbl)}{_info_btn(key)}</div><div class="tile-sub">{T("{n} de {d}", n=n, d=d)}</div></div>'
         for n, d, lbl, key in [
             (delivered, sent, "Taxa de entrega", "taxa_entrega"),
             (read, sent, "Taxa de leitura", "taxa_leitura"),
@@ -1341,43 +1419,48 @@ def _panel_sections():
         cards += f"""
         <div class="card">
           <div class="card-head">
-            <span class="name">{_e(lead['nome'] or '(sem nome)')}</span>
+            <span class="name">{_e(lead['nome'] or T('(sem nome)'))}</span>
             <span class="badge-row">
               <span class="badge">{_e(lead['perfil'])}</span>
-              <span class="chip chip-good">&#9679; QUENTE</span>
+              <span class="chip chip-good">&#9679; {T("QUENTE")}</span>
             </span>
           </div>
-          <div class="phone">{_e(lead['phone'])}</div>
+          <div class="phone">{_e(lead['phone'])}{f" &middot; {_e(lead['email'])}" if lead.get('email') else ""}</div>
           <div class="signals">
-            <div><span class="signal-label">Objetivo</span>{_e(s['objetivo'] or '-')}</div>
-            <div><span class="signal-label">Experiencia</span>{_e(s['experiencia'] or '-')}</div>
-            <div><span class="signal-label">Forma de pagamento</span>{_e(s['forma_pagamento'] or '-')}</div>
-            <div><span class="signal-label">Unidades</span>{_e(s['quantidade_unidades'] or '-')}</div>
-            <div><span class="signal-label">Timing</span>{_e(s['timing'] or '-')}</div>
+            <div><span class="signal-label">{T("Objetivo")}</span>{_e(s['objetivo'] or '-')}</div>
+            <div><span class="signal-label">{T("Experiencia")}</span>{_e(s['experiencia'] or '-')}</div>
+            <div><span class="signal-label">{T("Forma de pagamento")}</span>{_e(s['forma_pagamento'] or '-')}</div>
+            <div><span class="signal-label">{T("Unidades")}</span>{_e(s['quantidade_unidades'] or '-')}</div>
+            <div><span class="signal-label">{T("Timing")}</span>{_e(s['timing'] or '-')}</div>
           </div>
           {f'<div class="last-msg">&ldquo;{_e(ultima)}&rdquo;</div>' if ultima else ''}
         </div>"""
     if not hot:
-        cards = '<div class="empty-state">Nenhum lead quente ainda. Assim que um investidor esquentar, aparece aqui.</div>'
+        cards = ('<div class="empty-state">'
+                 + T("Nenhum lead quente ainda. Assim que um investidor esquentar, aparece aqui.")
+                 + '</div>')
 
     tmap = lead_store.tags_map()
 
     def _kanban_card(lead):
         phone = lead["phone"]
+        email = lead.get("email") or ""
         alltags = _auto_tags(lead) + tmap.get(phone, [])
-        haystack = _e(f"{lead.get('nome','')} {phone} {lead.get('pais','')} {' '.join(alltags)}").lower()
+        haystack = _e(f"{lead.get('nome','')} {phone} {email} {lead.get('pais','')} {' '.join(alltags)}").lower()
         chips = "".join(f'<span class="chip chip-muted mini">{_e(t)}</span>' for t in alltags[:3])
         if len(alltags) > 3:
             chips += f'<span class="tag-more">+{len(alltags) - 3}</span>'
+        email_line = f'<div class="kanban-email">{_e(email)}</div>' if email else ""
         # The delivery chip is only worth showing once something has been sent.
         # A "pendente" delivery just repeats the Pendentes column header, so skip it.
         deliv = lead.get("delivery", "pendente")
         foot = f'<div class="kanban-foot">{_delivery_chip(deliv)}</div>' if deliv != "pendente" else ""
         return f"""
         <div class="kanban-card" data-search="{haystack}">
-          <a class="contact-link" href="/contato/{_e(phone)}">{_e(lead.get('nome') or '(sem nome)')}</a>
+          <a class="contact-link" href="/contato/{_e(phone)}">{_e(lead.get('nome') or T('(sem nome)'))}</a>
           <div class="row-tags">{chips}</div>
           <div class="kanban-phone">{_e(phone)}</div>
+          {email_line}
           {foot}
         </div>"""
 
@@ -1388,18 +1471,20 @@ def _panel_sections():
     cols_html = ""
     for key, label, cls in BOARD_COLUMNS:
         col_leads = by_stage.get(key, [])
-        inner = "".join(_kanban_card(l) for l in col_leads) or '<div class="board-empty">Vazio</div>'
+        inner = "".join(_kanban_card(l) for l in col_leads) or f'<div class="board-empty">{T("Vazio")}</div>'
         cols_html += f"""
         <div class="board-col {cls}">
-          <div class="board-col-head"><span class="board-col-title">{label}{_info_btn(key)}</span><span class="board-col-count">{len(col_leads)}</span></div>
+          <div class="board-col-head"><span class="board-col-title">{T(label)}{_info_btn(key)}</span><span class="board-col-count">{len(col_leads)}</span></div>
           <div class="board-col-body">{inner}</div>
         </div>"""
 
     if not leads:
-        board_section = '<div class="empty-state">Nenhum contato ainda. Importe uma planilha para comecar.</div>'
+        board_section = ('<div class="empty-state">'
+                         + T("Nenhum contato ainda. Importe uma planilha para comecar.")
+                         + '</div>')
     else:
         board_section = f"""
-        <input class="search" type="search" placeholder="Buscar por nome, telefone, pais ou tag..." oninput="filterRows(this.value)">
+        <input class="search" type="search" placeholder="{T("Buscar por nome, telefone, email ou tag...")}" oninput="filterRows(this.value)">
         <div class="board">{cols_html}</div>"""
 
     conta_map = {
@@ -1409,20 +1494,20 @@ def _panel_sections():
         "match": ("bad", "A nova senha e a confirmacao nao conferem."),
     }
     cm = conta_map.get(request.args.get("conta"))
-    toast = f'<div class="alert alert-{cm[0]}">{cm[1]}</div>' if cm else ""
+    toast = f'<div class="alert alert-{cm[0]}">{T(cm[1])}</div>' if cm else ""
 
     return toast + _render_campaign() + f"""
-  <section><h2>Funil</h2><div class="funnel">{funnel_rows}</div></section>
-  <section><h2>Taxas de conversao</h2><div class="tiles">{rate_tiles}</div></section>
-  <section><h2>Envios por dia</h2>{_daily_sends_chart()}</section>
-  <section><h2>Leads quentes ({len(hot)})</h2>{cards}</section>
-  <section><h2>Contatos por status ({len(leads)})</h2>{board_section}</section>
+  <section><h2>{T("Funil")}</h2><div class="funnel">{funnel_rows}</div></section>
+  <section><h2>{T("Taxas de conversao")}</h2><div class="tiles">{rate_tiles}</div></section>
+  <section><h2>{T("Envios por dia")}</h2>{_daily_sends_chart()}</section>
+  <section><h2>{T("Leads quentes ({n})", n=len(hot))}</h2>{cards}</section>
+  <section><h2>{T("Contatos por status ({n})", n=len(leads))}</h2>{board_section}</section>
   """ + _INFO_MODAL_HTML
 
 
 def _render_panel_html():
-    return _page("Painel Guerra Cyrela", "Painel do piloto de reativacao", "painel",
-                 _panel_sections() + _BOARD_JS + _LIVE_JS)
+    return _page("Painel Guerra Cyrela", T("Painel do piloto de reativacao"), "painel",
+                 _panel_sections() + _board_js() + _LIVE_JS)
 
 
 _UPLOAD_ICON = (
@@ -1445,11 +1530,11 @@ _XLSX_ICON = (
 def _render_history():
     items = run_history.recent(10)
     if not items:
-        return '<div class="empty-state">Nenhuma execucao ainda.</div>'
+        return f'<div class="empty-state">{T("Nenhuma execucao ainda.")}</div>'
     rows = "".join(
         f"""<div class="hist-row">
           <span class="hist-when">{_e(it.get('quando'))}</span>
-          <span class="chip {'chip-good' if it.get('acao') == 'Importacao' else 'chip-info'}">{_e(it.get('acao'))}</span>
+          <span class="chip {'chip-good' if it.get('acao') == 'Importacao' else 'chip-info'}">{_e(T(it.get('acao') or ''))}</span>
           <span class="hist-detail">{_e(it.get('detalhe'))}</span>
         </div>""" for it in items
     )
@@ -1460,17 +1545,16 @@ def _render_import_form(erro=None):
     alert = f'<div class="alert alert-bad">{_e(erro)}</div>' if erro else ""
     body = f"""
   <section>
-    <h2>Importar planilha de contatos</h2>
+    <h2>{T("Importar planilha de contatos")}</h2>
     {alert}
     <div class="panel-box">
-      <p class="muted-text">Envie a planilha (.xlsx) com as colunas nome, telefone e email.
-      A gente analisa, remove duplicados e mostra um resumo antes de importar de verdade.</p>
+      <p class="muted-text">{T("Envie a planilha (.xlsx) com as colunas nome, telefone e email. A gente analisa, remove duplicados e mostra um resumo antes de importar de verdade.")}</p>
       <form id="import-form" method="post" action="/importar/analisar" enctype="multipart/form-data">
         <input id="file-input" type="file" name="arquivo" accept=".xlsx" hidden>
         <div id="dropzone" class="dropzone" onclick="document.getElementById('file-input').click()">
           <div class="dz-icon">{_UPLOAD_ICON}</div>
-          <div class="dz-title">Arraste a planilha aqui ou clique para selecionar</div>
-          <div class="dz-hint">Apenas arquivos .xlsx</div>
+          <div class="dz-title">{T("Arraste a planilha aqui ou clique para selecionar")}</div>
+          <div class="dz-hint">{T("Apenas arquivos .xlsx")}</div>
         </div>
         <div id="file-card" class="file-card" hidden>
           <span class="file-icon">{_XLSX_ICON}</span>
@@ -1482,27 +1566,27 @@ def _render_import_form(erro=None):
             </div>
           </div>
           <span id="progress-pct" class="progress-pct"></span>
-          <button type="button" class="file-remove" onclick="cancelUpload()" title="Cancelar">&times;</button>
+          <button type="button" class="file-remove" onclick="cancelUpload()" title="{T("Cancelar")}">&times;</button>
         </div>
         <div id="file-error" class="alert alert-bad" hidden></div>
         <div class="form-actions">
-          <button id="submit-btn" class="btn btn-primary" type="submit" disabled>Analisar planilha</button>
+          <button id="submit-btn" class="btn btn-primary" type="submit" disabled>{T("Analisar planilha")}</button>
         </div>
       </form>
     </div>
   </section>
   <section>
-    <h2>Historico de execucoes</h2>
+    <h2>{T("Historico de execucoes")}</h2>
     <div id="history-live">{_render_history()}</div>
-  </section>""" + _IMPORT_JS + _IMPORT_LIVE_JS
-    return _page("Importar base", "Importacao de contatos", "importar", body)
+  </section>""" + _import_js() + _IMPORT_LIVE_JS
+    return _page(T("Importar base"), T("Importacao de contatos"), "importar", body)
 
 
 def _render_import_review(token, a):
     n_clean = len(a["clean"])
     n_intl = len(a["internacionais"])
     tiles = "".join(
-        f'<div class="tile"><div class="tile-num">{n}</div><div class="tile-label">{lbl}</div></div>'
+        f'<div class="tile"><div class="tile-num">{n}</div><div class="tile-label">{T(lbl)}</div></div>'
         for n, lbl in [
             (a["total_rows"], "Linhas na planilha"),
             (n_clean, "Brasil limpos"),
@@ -1515,44 +1599,43 @@ def _render_import_review(token, a):
         f"<tr><td>{_e(pais)}</td><td class='num'>{n}</td></tr>" for pais, n in a["by_country"]
     )
     country_block = (
-        f'<div class="table-wrap"><table><thead><tr><th>Pais</th><th>Contatos</th></tr></thead>'
+        f'<div class="table-wrap"><table><thead><tr><th>{T("Pais")}</th><th>{T("Contatos")}</th></tr></thead>'
         f"<tbody>{country_rows}</tbody></table></div>" if country_rows else ""
     )
     body = f"""
   <section>
-    <h2>Revisao da base</h2>
+    <h2>{T("Revisao da base")}</h2>
     <div class="tiles">{tiles}</div>
   </section>
   <section>
-    <h2>Confirmar importacao</h2>
+    <h2>{T("Confirmar importacao")}</h2>
     <div class="panel-box">
-      <p class="muted-text">Serao importados <b>{n_clean}</b> contatos do Brasil.
-      Os {n_intl} internacionais podem entrar junto (investidores de fora que compram em SP).</p>
+      <p class="muted-text">{T("Serao importados <b>{n}</b> contatos do Brasil. Os {i} internacionais podem entrar junto (investidores de fora que compram em SP).", n=n_clean, i=n_intl)}</p>
       {country_block}
       <form method="post" action="/importar/confirmar">
         <input type="hidden" name="token" value="{_e(token)}">
-        <label class="checkbox"><input type="checkbox" name="incluir_intl" value="sim" checked> Incluir os {n_intl} contatos internacionais</label>
-        <button class="btn btn-primary" type="submit">Confirmar e importar</button>
-        <a class="btn btn-ghost" href="/importar">Cancelar</a>
+        <label class="checkbox"><input type="checkbox" name="incluir_intl" value="sim" checked> {T("Incluir os {i} contatos internacionais", i=n_intl)}</label>
+        <button class="btn btn-primary" type="submit">{T("Confirmar e importar")}</button>
+        <a class="btn btn-ghost" href="/importar">{T("Cancelar")}</a>
       </form>
     </div>
   </section>"""
-    return _page("Revisar importacao", "Importacao de contatos", "importar", body)
+    return _page(T("Revisao da base"), T("Importacao de contatos"), "importar", body)
 
 
 def _render_import_done(imported, skipped, include_intl, n_intl):
-    intl_note = f" (incluindo {n_intl} internacionais)" if include_intl else ""
+    intl_note = T(" (incluindo {i} internacionais)", i=n_intl) if include_intl else ""
     body = f"""
   <section>
-    <h2>Importacao concluida</h2>
+    <h2>{T("Importacao concluida")}</h2>
     <div class="panel-box">
-      <div class="alert alert-good">{imported} contatos importados{intl_note}.</div>
-      <p class="muted-text">{skipped} ja existiam na base e foram mantidos como estavam, sem sobrescrever conversas em andamento.</p>
-      <a class="btn btn-primary" href="/painel">Ver o painel</a>
-      <a class="btn btn-ghost" href="/importar">Importar outra planilha</a>
+      <div class="alert alert-good">{T("{n} contatos importados{note}.", n=imported, note=intl_note)}</div>
+      <p class="muted-text">{T("{s} ja existiam na base e foram mantidos como estavam, sem sobrescrever conversas em andamento.", s=skipped)}</p>
+      <a class="btn btn-primary" href="/painel">{T("Ver o painel")}</a>
+      <a class="btn btn-ghost" href="/importar">{T("Importar outra planilha")}</a>
     </div>
   </section>"""
-    return _page("Importacao concluida", "Importacao de contatos", "importar", body)
+    return _page(T("Importacao concluida"), T("Importacao de contatos"), "importar", body)
 
 
 if __name__ == "__main__":
