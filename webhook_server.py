@@ -820,6 +820,9 @@ _SHARED_CSS = """<style>
   .nav-ic { display: flex; }
   main { padding: 22px 20px 44px; max-width: 1280px; margin: 0 auto; }
   section { margin-bottom: 28px; }
+  .contact-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
+  .contact-grid > section { margin-bottom: 0; }
+  @media (max-width: 760px) { .contact-grid { grid-template-columns: 1fr; } }
   h2 { font-size: 12px; color: var(--text-muted); font-weight: 700; margin: 0 0 12px;
        text-transform: uppercase; letter-spacing: 0.6px; display: flex; align-items: center; gap: 8px; }
   h2::before { content: ''; width: 3px; height: 13px; background: var(--accent); border-radius: 2px; }
@@ -1351,6 +1354,7 @@ def _render_contact(lead):
     {f'<div class="alert alert-bad">{T("Motivo da falha")}: {_e(lead.get("last_error"))}</div>' if lead.get("delivery") == "falhou" and lead.get("last_error") else ""}
   </section>
 
+  <div class="contact-grid">
   <section>
     <h2>{T("Tags")}</h2>
     <div class="panel-box">
@@ -1382,7 +1386,8 @@ def _render_contact(lead):
   <section>
     <h2>{T("Conversa")}</h2>
     <div class="timeline">{_timeline_html(lead)}</div>
-  </section>"""
+  </section>
+  </div>"""
     return _page(lead["nome"] or phone, T("Detalhe do contato"), "painel", body)
 
 
