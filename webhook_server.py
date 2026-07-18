@@ -878,10 +878,19 @@ _SHARED_CSS = """<style>
   .nav-ic { display: flex; }
   main { padding: 22px 20px 44px; max-width: 1280px; margin: 0 auto; }
   section { margin-bottom: 28px; }
-  .contact-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
-  .contact-grid > section { margin-bottom: 0; }
-  .contact-grid > section.grid-full { grid-column: 1 / -1; }
-  @media (max-width: 760px) { .contact-grid { grid-template-columns: 1fr; } }
+  /* contact detail: header, tags, qualification and notes combined into one card */
+  .combined-grid { display: grid; grid-template-columns: 1fr 1fr; }
+  .combined-grid.panel-box { padding: 0; }
+  .combined-cell { padding: 22px 24px; min-width: 0; }
+  .combined-cell h2 { margin-top: 0; }
+  .combined-cell:nth-child(1), .combined-cell:nth-child(3) { border-right: 1px solid var(--border); }
+  .combined-cell:nth-child(1), .combined-cell:nth-child(2) { border-bottom: 1px solid var(--border); }
+  @media (max-width: 760px) {
+    .combined-grid { grid-template-columns: 1fr; }
+    .combined-cell { border-right: none; }
+    .combined-cell:not(:last-child) { border-bottom: 1px solid var(--border); }
+    .combined-cell:last-child { border-bottom: none; }
+  }
   h2 { font-size: 12px; color: var(--text-muted); font-weight: 700; margin: 0 0 12px;
        text-transform: uppercase; letter-spacing: 0.6px; display: flex; align-items: center; gap: 8px; }
   h2::before { content: ''; width: 3px; height: 13px; background: var(--accent); border-radius: 2px; }
@@ -1402,56 +1411,54 @@ def _render_contact(lead):
 
     body = f"""
   <a class="back-link" href="/painel">&larr; {T("Voltar ao painel")}</a>
-  <div class="contact-grid">
   <section>
-    <div class="contact-header">
-      <div>
-        <div class="contact-name">{_e(lead["nome"] or T("(sem nome)"))}</div>
-        <div class="contact-sub">{_e(phone)} &middot; {_e(lead["pais"] or lead["origem"])}{f' &middot; {_e(lead["email"])}' if lead.get("email") else ""}</div>
+    <div class="panel-box combined-grid">
+      <div class="combined-cell">
+        <div class="contact-header">
+          <div>
+            <div class="contact-name">{_e(lead["nome"] or T("(sem nome)"))}</div>
+            <div class="contact-sub">{_e(phone)} &middot; {_e(lead["pais"] or lead["origem"])}{f' &middot; {_e(lead["email"])}' if lead.get("email") else ""}</div>
+          </div>
+          <div class="contact-chips">
+            <span class="chip chip-muted">{_e(lead["perfil"])}</span>
+            <span class="chip chip-info">{_e(T(STAGE_LABELS.get(lead["stage"], lead["stage"])))}</span>
+            {_delivery_chip(lead.get("delivery", "pendente"), lead.get("last_error"))}
+            <a class="btn btn-primary" href="https://wa.me/{_e(phone)}" target="_blank" rel="noopener">{T("Abrir no WhatsApp")}</a>
+          </div>
+        </div>
+        {f'<div class="alert alert-bad">{T("Motivo da falha")}: {_e(lead.get("last_error"))}</div>' if lead.get("delivery") == "falhou" and lead.get("last_error") else ""}
       </div>
-      <div class="contact-chips">
-        <span class="chip chip-muted">{_e(lead["perfil"])}</span>
-        <span class="chip chip-info">{_e(T(STAGE_LABELS.get(lead["stage"], lead["stage"])))}</span>
-        {_delivery_chip(lead.get("delivery", "pendente"), lead.get("last_error"))}
-        <a class="btn btn-primary" href="https://wa.me/{_e(phone)}" target="_blank" rel="noopener">{T("Abrir no WhatsApp")}</a>
+
+      <div class="combined-cell">
+        <h2>{T("Tags")}</h2>
+        <div class="tag-group"><span class="tag-group-label">{T("Automaticas")}</span>{auto_chips}</div>
+        <div class="tag-group"><span class="tag-group-label">{T("Manuais")}</span>{manual_chips}</div>
+        <form method="post" action="/contato/{_e(phone)}/tag" class="inline-form">
+          <input class="search inline-input" type="text" name="tag" placeholder="{T("Nova tag...")}" maxlength="40" required>
+          <button class="btn btn-ghost" type="submit">{T("Adicionar")}</button>
+        </form>
+      </div>
+
+      <div class="combined-cell">
+        <h2>{T("Sinais de qualificacao")}</h2>
+        <div class="signals">{signals_html}</div>
+      </div>
+
+      <div class="combined-cell">
+        <h2>{T("Notas")}</h2>
+        <form method="post" action="/contato/{_e(phone)}/nota" class="inline-form">
+          <input class="search inline-input" type="text" name="nota" placeholder="{T("Escrever uma nota...")}" maxlength="300" required>
+          <button class="btn btn-ghost" type="submit">{T("Adicionar nota")}</button>
+        </form>
+        <div class="notes-list">{notes_list}</div>
       </div>
     </div>
-    {f'<div class="alert alert-bad">{T("Motivo da falha")}: {_e(lead.get("last_error"))}</div>' if lead.get("delivery") == "falhou" and lead.get("last_error") else ""}
   </section>
 
   <section>
-    <h2>{T("Tags")}</h2>
-    <div class="panel-box">
-      <div class="tag-group"><span class="tag-group-label">{T("Automaticas")}</span>{auto_chips}</div>
-      <div class="tag-group"><span class="tag-group-label">{T("Manuais")}</span>{manual_chips}</div>
-      <form method="post" action="/contato/{_e(phone)}/tag" class="inline-form">
-        <input class="search inline-input" type="text" name="tag" placeholder="{T("Nova tag...")}" maxlength="40" required>
-        <button class="btn btn-ghost" type="submit">{T("Adicionar")}</button>
-      </form>
-    </div>
-  </section>
-
-  <section>
-    <h2>{T("Sinais de qualificacao")}</h2>
-    <div class="panel-box"><div class="signals">{signals_html}</div></div>
-  </section>
-
-  <section>
-    <h2>{T("Notas")}</h2>
-    <div class="panel-box">
-      <form method="post" action="/contato/{_e(phone)}/nota" class="inline-form">
-        <input class="search inline-input" type="text" name="nota" placeholder="{T("Escrever uma nota...")}" maxlength="300" required>
-        <button class="btn btn-ghost" type="submit">{T("Adicionar nota")}</button>
-      </form>
-      <div class="notes-list">{notes_list}</div>
-    </div>
-  </section>
-
-  <section class="grid-full">
     <h2>{T("Conversa")}</h2>
     <div class="timeline">{_timeline_html(lead)}</div>
-  </section>
-  </div>"""
+  </section>"""
     return _page(lead["nome"] or phone, T("Detalhe do contato"), "painel", body)
 
 
