@@ -224,6 +224,13 @@ def importar():
     return _render_import_form()
 
 
+@app.route("/importar/historico")
+@_requires_auth
+def importar_historico():
+    # execution-history fragment for the import page's live refresh
+    return _render_history()
+
+
 @app.route("/importar/analisar", methods=["POST"])
 @_requires_auth
 def importar_analisar():
@@ -453,6 +460,24 @@ window.hideState = function () {
 document.addEventListener('keydown', function (e) { if (e.key === 'Escape') window.hideState(); });
 </script>
 """
+
+_IMPORT_LIVE_JS = """
+<script>
+(function () {
+  function schedule() { setTimeout(refresh, 5000); }
+  function refresh() {
+    fetch('/importar/historico', {credentials: 'same-origin'})
+      .then(function (r) { if (!r.ok) throw 0; return r.text(); })
+      .then(function (html) {
+        var el = document.getElementById('history-live');
+        if (el) el.innerHTML = html;
+        schedule();
+      })
+      .catch(function () { schedule(); });
+  }
+  schedule();
+})();
+</script>"""
 
 _IMPORT_JS = """
 <script>
@@ -1427,8 +1452,8 @@ def _render_import_form(erro=None):
   </section>
   <section>
     <h2>Historico de execucoes</h2>
-    {_render_history()}
-  </section>""" + _IMPORT_JS
+    <div id="history-live">{_render_history()}</div>
+  </section>""" + _IMPORT_JS + _IMPORT_LIVE_JS
     return _page("Importar base", "Importacao de contatos", "importar", body)
 
 
