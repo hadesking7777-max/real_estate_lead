@@ -184,9 +184,9 @@ def painel():
 
 
 @app.route("/resultados")
-@_requires_auth
 def resultados():
-    return _render_resultados()
+    # merged into /painel; keep the route as a redirect for old bookmarks
+    return redirect("/painel")
 
 
 @app.route("/importar", methods=["GET"])
@@ -750,20 +750,12 @@ _NAV_ICON_IMPORT = (
     '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
     '<polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>'
 )
-_NAV_ICON_RESULTS = (
-    '<svg class="nav-ic" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" '
-    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
-    '<path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/></svg>'
-)
-
-
 def _nav(active):
     def item(href, label, key, icon):
         cls = "nav-item active" if key == active else "nav-item"
         return f'<a class="{cls}" href="{href}">{icon}{label}</a>'
     return ('<nav class="nav"><div class="nav-inner">'
-            + item("/painel", "Funil e contatos", "painel", _NAV_ICON_FUNNEL)
-            + item("/resultados", "Resultados", "resultados", _NAV_ICON_RESULTS)
+            + item("/painel", "Painel", "painel", _NAV_ICON_FUNNEL)
             + item("/importar", "Importar base", "importar", _NAV_ICON_IMPORT)
             + '<span class="nav-spacer"></span>'
             + '<a class="nav-item nav-logout" href="/logout">Sair</a>'
@@ -977,33 +969,6 @@ def _daily_sends_chart():
     return f'<div class="colchart-wrap"><div class="colchart">{cols}</div></div>'
 
 
-def _render_resultados():
-    dc = lead_store.delivery_counts()
-    fc = lead_store.funnel_counts()
-    sent = dc["enviado"] + dc["entregue"] + dc["lido"] + dc["respondeu"]
-    delivered = dc["entregue"] + dc["lido"] + dc["respondeu"]
-    read = dc["lido"] + dc["respondeu"]
-    responded = dc["respondeu"]
-    quente = fc.get("quente", 0)
-
-    vol_tiles = "".join(
-        f'<div class="tile"><div class="tile-num">{n}</div><div class="tile-label">{lbl}</div></div>'
-        for n, lbl in [(sent, "Enviados"), (delivered, "Entregues"), (read, "Lidos"),
-                       (responded, "Respostas"), (quente, "Leads quentes")]
-    )
-    rate_tiles = "".join(
-        f'<div class="tile"><div class="tile-num">{_fmt_pct(n, d)}</div>'
-        f'<div class="tile-label">{lbl}</div><div class="tile-sub">{n} de {d}</div></div>'
-        for n, d, lbl in [(delivered, sent, "Taxa de entrega"), (read, sent, "Taxa de leitura"),
-                          (responded, sent, "Taxa de resposta"), (quente, responded, "Taxa de qualificacao")]
-    )
-    body = f"""
-  <section><h2>Volume</h2><div class="tiles">{vol_tiles}</div></section>
-  <section><h2>Taxas de conversao</h2><div class="tiles">{rate_tiles}</div></section>
-  <section><h2>Envios por dia</h2>{_daily_sends_chart()}</section>"""
-    return _page("Resultados", "Metricas da campanha", "resultados", body)
-
-
 def _render_campaign():
     s = scheduler.status_summary()
     status = s["status"]
@@ -1070,6 +1035,19 @@ def _render_panel_html():
         f'<div class="tile"><div class="tile-num">{deliv.get(k, 0)}</div>'
         f'<div class="tile-label">{DELIVERY_LABELS[k]}</div></div>'
         for k in ["pendente", "enviado", "entregue", "lido", "respondeu", "falhou"]
+    )
+
+    # conversion rates (merged from the old Resultados tab)
+    sent = deliv["enviado"] + deliv["entregue"] + deliv["lido"] + deliv["respondeu"]
+    delivered = deliv["entregue"] + deliv["lido"] + deliv["respondeu"]
+    read = deliv["lido"] + deliv["respondeu"]
+    responded = deliv["respondeu"]
+    quente_n = counts.get("quente", 0)
+    rate_tiles = "".join(
+        f'<div class="tile"><div class="tile-num">{_fmt_pct(n, d)}</div>'
+        f'<div class="tile-label">{lbl}</div><div class="tile-sub">{n} de {d}</div></div>'
+        for n, d, lbl in [(delivered, sent, "Taxa de entrega"), (read, sent, "Taxa de leitura"),
+                          (responded, sent, "Taxa de resposta"), (quente_n, responded, "Taxa de qualificacao")]
     )
 
     secondary_tiles = "".join(
@@ -1142,7 +1120,9 @@ def _render_panel_html():
     body = _render_campaign() + f"""
   <section><div class="tiles">{kpi_tiles}</div></section>
   <section><h2>Funil</h2><div class="funnel">{funnel_rows}</div></section>
+  <section><h2>Taxas de conversao</h2><div class="tiles">{rate_tiles}</div></section>
   <section><h2>Status de envio</h2><div class="tiles">{deliv_tiles}</div></section>
+  <section><h2>Envios por dia</h2>{_daily_sends_chart()}</section>
   <section><h2>Outros estados</h2><div class="tiles">{secondary_tiles}</div></section>
   <section><h2>Leads quentes ({len(hot)})</h2>{cards}</section>
   <section><h2>Contatos ({len(leads)})</h2>{table_section}</section>
