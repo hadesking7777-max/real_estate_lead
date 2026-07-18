@@ -379,8 +379,9 @@ def _delivery_for_stage(stage, current):
     return "respondeu"
 
 
-# Delivery tags the operator can choose when moving a card into Contacted.
-CONTACTED_DELIVERY_CHOICES = ["enviado", "entregue", "lido", "falhou"]
+# Delivery tags the operator can choose when moving a card into Contacted (Failed
+# is now its own column, and "Sent" is implied by being in Contacted).
+CONTACTED_DELIVERY_CHOICES = ["enviado", "entregue", "lido"]
 
 
 @app.route("/board/etapa", methods=["POST"])
@@ -388,13 +389,20 @@ CONTACTED_DELIVERY_CHOICES = ["enviado", "entregue", "lido", "falhou"]
 def board_etapa():
     # drag-and-drop stage change on the board; returns no body (AJAX)
     phone = request.form.get("phone", "")
-    stage = request.form.get("stage", "")
+    target = request.form.get("stage", "")
     chosen = request.form.get("delivery", "")
     lead = lead_store.get_lead(phone) if phone else None
+    # the "falhou" column is virtual: it means Contacted + a failed delivery
+    if target == "falhou":
+        stage, forced = "contatado", "falhou"
+    else:
+        stage, forced = target, None
     if stage in lead_store.STAGES and lead:
         who = PANEL_USER  # single-login panel: the operator making the change
         lead_store.set_stage(phone, stage, actor=who, source="manual")
-        if chosen in DELIVERY_LABELS:
+        if forced:
+            lead_store.set_delivery(phone, forced, actor=who, source="manual")
+        elif chosen in DELIVERY_LABELS:
             # explicit tag picked in the modal (used when dropping into Contacted)
             lead_store.set_delivery(phone, chosen, actor=who, source="manual")
         else:
@@ -487,10 +495,13 @@ FUNNEL_STAGES = [
     ("quente", "Quentes"),
 ]
 
-# Kanban board columns (status pipeline), in flow order. (stage_key, label, header css class)
+# Kanban board columns (status pipeline), in flow order. (column_key, label, header css class)
+# "falhou" is a virtual column: contatado leads whose send failed live here, not in
+# Contatados, so Contatados only holds successful sends.
 BOARD_COLUMNS = [
     ("pendente", "Pendentes", ""),
     ("contatado", "Contatados", "col-info"),
+    ("falhou", "Falha de envio", "col-bad"),
     ("respondeu", "Responderam", "col-info"),
     ("qualificando", "Em qualificacao", "col-info"),
     ("quente", "Quentes", "col-good"),
@@ -498,6 +509,13 @@ BOARD_COLUMNS = [
     ("frio", "Frio", ""),
     ("opt_out", "Opt-out", "col-bad"),
 ]
+
+
+def _board_col_of(lead):
+    """Which board column a lead belongs to (splits failed sends out of Contatados)."""
+    if lead.get("stage") == "contatado" and lead.get("delivery") == "falhou":
+        return "falhou"
+    return lead.get("stage")
 
 
 def _fmt_pct(n, d):
@@ -628,6 +646,7 @@ _STATE_INFO_SRC = {
     "campanha": ("Campanha", "Controle manual do envio. Voce escolhe quantos contatos disparar agora e clica em Enviar agora. Pode repetir quantas vezes quiser. Os envios saem espacados automaticamente para proteger o numero."),
     "pendente": ("Pendentes", "Contatos que ainda nao receberam nenhuma mensagem. Estao na fila para o primeiro contato quando a campanha rodar."),
     "contatado": ("Contatados", "Ja receberam a mensagem de abertura, mas ainda nao responderam. Aguardando resposta, ou entrando na cadencia de follow-up."),
+    "falhou": ("Falha de envio", "O WhatsApp aceitou o envio mas nao entregou a mensagem (por exemplo, o limite de mensagens de marketing por contato). A mensagem nao chegou. Sao contatos que foram disparados mas falharam."),
     "respondeu": ("Responderam", "Responderam a primeira mensagem. A IA comeca a qualificacao a partir daqui."),
     "qualificando": ("Em qualificacao", "Estao conversando com a IA agora, que mede intencao, capital, forma de pagamento e timing."),
     "quente": ("Quentes", "Leads qualificados, com alta intencao de compra. Ja entregues no seu WhatsApp para fechar."),
@@ -1918,16 +1937,18 @@ def _panel_sections():
         if len(alltags) > 3:
             chips += f'<span class="tag-more">+{len(alltags) - 3}</span>'
         email_line = f'<div class="kanban-email">{_e(email)}</div>' if email else ""
-        # The delivery tag is only meaningful in the Contacted column (Sent/Delivered/
-        # Read/Failed). In every other column it would just restate the column ("Replied"
-        # for all of them, nothing for Pending), so we only show it under Contacted.
+        # Failed sends live in the "Falha de envio" column -> show the reason, no chip.
+        # In Contacted, only Delivered/Read show (Sent is implied by the column). Every
+        # other column restates itself, so no chip there.
         deliv = lead.get("delivery", "pendente")
+        stage = lead.get("stage")
         err = lead.get("last_error") or ""
         foot = ""
-        if lead.get("stage") == "contatado" and deliv != "pendente":
-            reason = f'<div class="kanban-error">{_e(err)}</div>' if (deliv == "falhou" and err) else ""
-            foot = f'<div class="kanban-foot">{_delivery_chip(deliv, err if deliv == "falhou" else None)}</div>{reason}'
-        elif lead.get("stage") == "pendente" and lead.get("last_send_ts"):
+        if stage == "contatado" and deliv == "falhou":
+            foot = f'<div class="kanban-error">{_e(err)}</div>' if err else ""
+        elif stage == "contatado" and deliv in ("entregue", "lido"):
+            foot = f'<div class="kanban-foot">{_delivery_chip(deliv)}</div>'
+        elif stage == "pendente" and lead.get("last_send_ts"):
             # in Pending but already messaged -> almost certainly moved here by mistake
             foot = (f'<div class="kanban-foot"><span class="kanban-warn" '
                     f'title="{T("Este contato ja recebeu a mensagem, mas esta em Pendentes. Provavelmente foi movido por engano.")}">'
@@ -1943,13 +1964,13 @@ def _panel_sections():
           {foot}
         </div>"""
 
-    by_stage = {}
+    by_col = {}
     for lead in leads:
-        by_stage.setdefault(lead.get("stage"), []).append(lead)
+        by_col.setdefault(_board_col_of(lead), []).append(lead)
 
     cols_html = ""
     for key, label, cls in BOARD_COLUMNS:
-        col_leads = by_stage.get(key, [])
+        col_leads = by_col.get(key, [])
         inner = "".join(_kanban_card(l) for l in col_leads) or f'<div class="board-empty">{T("Vazio")}</div>'
         cols_html += f"""
         <div class="board-col {cls}">

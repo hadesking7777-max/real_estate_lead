@@ -103,7 +103,10 @@ EN = {
     "Nenhum contato ainda. Importe uma planilha para comecar.":
         "No contacts yet. Import a spreadsheet to get started.",
     "Buscar por nome, telefone, email ou tag...": "Search by name, phone, email or tag...",
-    # stage labels
+    # stage / board-column labels
+    "Falha de envio": "Send failed",
+    "O WhatsApp aceitou o envio mas nao entregou a mensagem (por exemplo, o limite de mensagens de marketing por contato). A mensagem nao chegou. Sao contatos que foram disparados mas falharam.":
+        "WhatsApp accepted the send but did not deliver the message (e.g. the per-contact marketing-message cap). It never reached them. These are contacts that were fired but failed.",
     "Pendentes": "Pending",
     "Contatados": "Contacted",
     "Responderam": "Replied",
