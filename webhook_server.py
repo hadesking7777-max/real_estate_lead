@@ -716,8 +716,8 @@ _SHARED_CSS = """<style>
   .brand { width: 40px; height: 40px; border-radius: 11px; background: rgba(255,255,255,0.14);
            display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 15px;
            letter-spacing: 0.5px; border: 1px solid rgba(255,255,255,0.20); flex-shrink: 0; }
-  .brand-logo { height: 42px; width: auto; border-radius: 10px; display: block; flex-shrink: 0;
-                background: rgba(255,255,255,0.10); padding: 3px 6px; border: 1px solid rgba(255,255,255,0.18); }
+  .brand-logo { height: 48px; width: auto; border-radius: 10px; display: block; flex-shrink: 0;
+                border: 1px solid rgba(255,255,255,0.16); }
   .header-text h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.2px; }
   .header-text p { margin: 3px 0 0; font-size: 13px; opacity: 0.82; }
   .nav { background: var(--nav-bg); border-bottom: 1px solid var(--border);
@@ -828,7 +828,7 @@ _SHARED_CSS = """<style>
   .login-brand { width: 48px; height: 48px; border-radius: 13px; background: var(--accent); color: #fff;
                  display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 18px;
                  letter-spacing: 0.5px; margin: 0 auto 14px; }
-  .login-logo { height: 58px; width: auto; display: block; margin: 0 auto 16px; border-radius: 12px; }
+  .login-logo { height: 84px; width: auto; display: block; margin: 0 auto 16px; border-radius: 12px; }
   .login-title { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
   .login-sub { margin: 4px 0 22px; font-size: 13px; color: var(--text-muted); }
   .login-label { display: block; text-align: left; font-size: 12px; color: var(--text-secondary);
