@@ -1350,6 +1350,10 @@ _SHARED_CSS = """<style>
                  padding: 12px; box-shadow: var(--shadow); transition: border-color .12s ease, transform .12s ease; }
   .kanban-card:hover { border-color: var(--accent); transform: translateY(-1px); }
   .kanban-card { cursor: grab; position: relative; }
+  /* tint cards by delivery progress: Sent=yellow, Delivered=blue, Read=green */
+  .kanban-card.card-sent { background: var(--status-warning-bg); box-shadow: inset 3px 0 0 var(--status-warning), var(--shadow); }
+  .kanban-card.card-delivered { background: var(--status-info-bg); box-shadow: inset 3px 0 0 var(--status-info), var(--shadow); }
+  .kanban-card.card-read { background: var(--status-good-bg); box-shadow: inset 3px 0 0 var(--status-good), var(--shadow); }
   .contact-link { padding-right: 22px; }
   .card-del { position: absolute; top: 7px; right: 7px; width: 22px; height: 22px; border: none;
               background: transparent; color: var(--text-muted); cursor: pointer; border-radius: 6px;
@@ -1987,9 +1991,11 @@ def _panel_sections():
             foot = (f'<div class="kanban-foot"><span class="kanban-warn" '
                     f'title="{T("Este contato ja recebeu a mensagem, mas esta em Pendentes. Provavelmente foi movido por engano.")}">'
                     f'{_WARN_ICON}{T("Ja enviado")}</span></div>')
+        # tint the card by how far the message got: Sent=yellow, Delivered=blue, Read=green
+        tint = {"enviado": " card-sent", "entregue": " card-delivered", "lido": " card-read"}.get(deliv, "")
         nome = lead.get('nome') or T('(sem nome)')
         return f"""
-        <div class="kanban-card" draggable="true" data-phone="{_e(phone)}" data-search="{haystack}">
+        <div class="kanban-card{tint}" draggable="true" data-phone="{_e(phone)}" data-search="{haystack}">
           <button class="card-del" type="button" draggable="false" data-phone="{_e(phone)}" data-name="{_e(nome)}" title="{T('Excluir')}">&times;</button>
           <a class="contact-link" draggable="false" href="/contato/{_e(phone)}">{_e(nome)}</a>
           <div class="row-tags">{chips}</div>
