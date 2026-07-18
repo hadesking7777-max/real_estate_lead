@@ -632,7 +632,7 @@ _SHARED_CSS = """<style>
          -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
   header { background-color: var(--header-bg);
            background-image: linear-gradient(135deg, rgba(255,255,255,0.06), rgba(0,0,0,0.14)); color: #fff; }
-  .header-inner { max-width: 960px; margin: 0 auto; padding: 18px 20px; display: flex; align-items: center; gap: 14px; }
+  .header-inner { max-width: 1280px; margin: 0 auto; padding: 18px 20px; display: flex; align-items: center; gap: 14px; }
   .brand { width: 40px; height: 40px; border-radius: 11px; background: rgba(255,255,255,0.14);
            display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 15px;
            letter-spacing: 0.5px; border: 1px solid rgba(255,255,255,0.20); flex-shrink: 0; }
@@ -640,14 +640,14 @@ _SHARED_CSS = """<style>
   .header-text p { margin: 3px 0 0; font-size: 13px; opacity: 0.82; }
   .nav { background: var(--nav-bg); border-bottom: 1px solid var(--border);
          padding: 0 20px; position: sticky; top: 0; z-index: 10; }
-  .nav-inner { display: flex; gap: 2px; max-width: 960px; margin: 0 auto; }
+  .nav-inner { display: flex; gap: 2px; max-width: 1280px; margin: 0 auto; }
   .nav-item { display: inline-flex; align-items: center; gap: 7px; padding: 13px 14px; font-size: 13px;
               color: var(--text-secondary); text-decoration: none; border-bottom: 2px solid transparent;
               transition: color .15s ease, border-color .15s ease; }
   .nav-item:hover { color: var(--text-primary); }
   .nav-item.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
   .nav-ic { display: flex; }
-  main { padding: 22px 20px 44px; max-width: 960px; margin: 0 auto; }
+  main { padding: 22px 20px 44px; max-width: 1280px; margin: 0 auto; }
   section { margin-bottom: 28px; }
   h2 { font-size: 12px; color: var(--text-muted); font-weight: 700; margin: 0 0 12px;
        text-transform: uppercase; letter-spacing: 0.6px; display: flex; align-items: center; gap: 8px; }
