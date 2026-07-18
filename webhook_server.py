@@ -791,21 +791,33 @@ _SPA_JS = """
   }
   function go(url, pushIt) {
     scrollPos[curKey] = window.scrollY;   // remember where we were before leaving
+    var cached = cache[url];
+    if (cached) { show(url, cached.h, cached.t, pushIt); }   // instant paint from cache
+    // The panel refreshes itself via __panelRefresh; nothing else to do when cached.
+    if (cached && new URL(url, location.href).pathname === '/painel') { return; }
     try {
-      if (cache[url]) { show(url, cache[url].h, cache[url].t, pushIt); return; }
       fetch(url, { credentials: 'same-origin' })
         .then(function (r) { if (!r.ok) throw 0; return r.text(); })
         .then(function (txt) {
           var doc = new DOMParser().parseFromString(txt, 'text/html');
           var nm = doc.querySelector('main');
-          if (!nm) { location.href = url; return; }
+          if (!nm) { if (!cached) { location.href = url; } return; }
           var tEl = doc.querySelector('title');
           var t = tEl ? tEl.textContent : document.title;
-          cache[url] = { h: nm.innerHTML, t: t };
-          show(url, nm.innerHTML, t, pushIt);
+          var fresh = nm.innerHTML;
+          var differs = !cached || cached.h !== fresh;
+          cache[url] = { h: fresh, t: t };
+          if (!cached) {
+            show(url, fresh, t, pushIt);                       // first visit: normal show
+          } else if (differs && keyOf(url) === curKey) {
+            // already shown from cache and it changed: refresh in place (keep scroll/history)
+            var y = window.scrollY;
+            main.innerHTML = fresh; document.title = t; runScripts(main);
+            window.scrollTo(0, y);
+          }
         })
-        .catch(function () { location.href = url; });
-    } catch (e) { location.href = url; }
+        .catch(function () { if (!cached) { location.href = url; } });
+    } catch (e) { if (!cached) { location.href = url; } }
   }
   document.addEventListener('click', function (e) {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
