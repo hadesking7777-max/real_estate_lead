@@ -324,15 +324,16 @@ def campanha_enviar():
     except ValueError:
         qty = 0
     if qty > 0:
-        scheduler.queue_manual(qty)
-    return redirect("/painel")
+        scheduler.queue_manual(qty)  # bumps events -> the panel refreshes over SSE
+    # submitted via AJAX (no reload); fall back to a redirect for a plain POST
+    return ("", 204) if request.form.get("ajax") else redirect("/painel")
 
 
 @app.route("/campanha/parar", methods=["POST"])
 @_requires_auth
 def campanha_parar():
     scheduler.stop_manual()
-    return redirect("/painel")
+    return ("", 204) if request.form.get("ajax") else redirect("/painel")
 
 
 @app.route("/campanha/status")
@@ -792,6 +793,19 @@ document.addEventListener('click', function (e) {
     fetch('/contato/' + encodeURIComponent(phone) + '/excluir',
           { method: 'POST', credentials: 'same-origin' }).catch(function () {});
   }
+});
+
+// Campaign Send now / Stop: submit via AJAX so the page doesn't reload; the panel
+// updates over SSE (queue_manual/stop_manual bump the change signal).
+document.addEventListener('submit', function (e) {
+  var form = e.target;
+  if (!form || !form.classList || !form.classList.contains('campaign-form')) return;
+  e.preventDefault();
+  var fd = new FormData(form);
+  fd.append('ajax', '1');
+  fetch(form.getAttribute('action'), { method: 'POST', body: fd, credentials: 'same-origin' })
+    .then(function () { if (window.__panelRefresh) window.__panelRefresh(); })
+    .catch(function () {});
 });
 })();
 </script>
@@ -1737,6 +1751,15 @@ def _render_contact(lead):
         f'<span>{_e(n["text"])}</span></div>' for n in notes
     ) or f'<div class="empty-state">{T("Nenhuma nota ainda.")}</div>'
 
+    # state chip mirrors the board column: a failed send reads "Send failed", not "Contacted"
+    _col = _board_col_of(lead)
+    if _col == "falhou":
+        state_label, state_cls = "Falha de envio", "chip-bad"
+    else:
+        state_label, state_cls = STAGE_LABELS.get(lead["stage"], lead["stage"]), "chip-info"
+    # the Failed delivery chip is redundant once the state itself says "Send failed"
+    deliv_chip = "" if lead.get("delivery") == "falhou" else _delivery_chip(lead.get("delivery", "pendente"))
+
     body = f"""
   <a class="back-link" href="/painel">&larr; {T("Voltar ao painel")}</a>
   <section>
@@ -1749,8 +1772,8 @@ def _render_contact(lead):
             <div class="contact-sub">{_e(phone)} &middot; {_e(lead["pais"] or lead["origem"])}{f' &middot; {_e(lead["email"])}' if lead.get("email") else ""}</div>
             <div class="contact-chips">
               <span class="chip chip-muted">{_e(lead["perfil"])}</span>
-              <span class="chip chip-info">{_e(T(STAGE_LABELS.get(lead["stage"], lead["stage"])))}</span>
-              {_delivery_chip(lead.get("delivery", "pendente"), lead.get("last_error"))}
+              <span class="chip {state_cls}">{_e(T(state_label))}</span>
+              {deliv_chip}
             </div>
           </div>
           <a class="btn btn-primary contact-wa" href="https://wa.me/{_e(phone)}" target="_blank" rel="noopener">{T("Abrir no WhatsApp")}</a>
@@ -1833,13 +1856,13 @@ def _render_campaign():
     metrics = T("Total enviados {a} &middot; Pendentes {b}", a=s["total_enviados"], b=s["pendentes"])
     # while sending, show a stop button; otherwise the manual "send N" form
     if sending:
-        control = ('<form method="post" action="/campanha/parar">'
+        control = ('<form method="post" action="/campanha/parar" class="campaign-form">'
                    f'<button class="btn btn-ghost" type="submit">{T("Parar envio")}</button></form>')
     else:
         maxq = max(s["pendentes"], 1)
         default_q = min(20, maxq)
         control = (
-            '<form method="post" action="/campanha/enviar" class="send-form">'
+            '<form method="post" action="/campanha/enviar" class="send-form campaign-form">'
             f'<input class="qty-input" type="number" name="quantidade" min="1" max="{maxq}" '
             f'value="{default_q}" title="{T("Quantos contatos enviar agora")}">'
             f'<button class="btn btn-primary" type="submit">{T("Enviar agora")}</button>'
