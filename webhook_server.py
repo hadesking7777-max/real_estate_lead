@@ -1132,12 +1132,12 @@ _SHARED_CSS = """<style>
   .tag-more { font-size: 10px; color: var(--text-muted); align-self: center; }
   .back-link { display: inline-block; color: var(--text-secondary); text-decoration: none; font-size: 13px; margin-bottom: 14px; }
   .back-link:hover { color: var(--accent); }
-  .contact-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; flex-wrap: wrap;
+  .contact-header { display: flex; justify-content: space-between; align-items: center; gap: 14px; flex-wrap: wrap;
                     background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; box-shadow: var(--shadow); }
   .contact-name { font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
   .contact-sub { font-size: 13px; color: var(--text-muted); margin-top: 4px; font-variant-numeric: tabular-nums; }
-  .contact-chips { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .contact-chips .btn { margin: 0; padding: 8px 14px; font-size: 13px; }
+  .contact-chips { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .contact-wa { margin: 0; padding: 8px 14px; font-size: 13px; flex-shrink: 0; }
   .tag-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
   .tag-group-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-muted); font-weight: 700; min-width: 90px; }
   .tag-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600;
@@ -1573,16 +1573,16 @@ def _render_contact(lead):
       <div class="combined-cell">
         <h2>{T("Contato")}</h2>
         <div class="contact-header">
-          <div>
+          <div class="contact-id">
             <div class="contact-name">{_e(lead["nome"] or T("(sem nome)"))}</div>
             <div class="contact-sub">{_e(phone)} &middot; {_e(lead["pais"] or lead["origem"])}{f' &middot; {_e(lead["email"])}' if lead.get("email") else ""}</div>
+            <div class="contact-chips">
+              <span class="chip chip-muted">{_e(lead["perfil"])}</span>
+              <span class="chip chip-info">{_e(T(STAGE_LABELS.get(lead["stage"], lead["stage"])))}</span>
+              {_delivery_chip(lead.get("delivery", "pendente"), lead.get("last_error"))}
+            </div>
           </div>
-          <div class="contact-chips">
-            <span class="chip chip-muted">{_e(lead["perfil"])}</span>
-            <span class="chip chip-info">{_e(T(STAGE_LABELS.get(lead["stage"], lead["stage"])))}</span>
-            {_delivery_chip(lead.get("delivery", "pendente"), lead.get("last_error"))}
-            <a class="btn btn-primary" href="https://wa.me/{_e(phone)}" target="_blank" rel="noopener">{T("Abrir no WhatsApp")}</a>
-          </div>
+          <a class="btn btn-primary contact-wa" href="https://wa.me/{_e(phone)}" target="_blank" rel="noopener">{T("Abrir no WhatsApp")}</a>
         </div>
         {f'<div class="alert alert-bad">{T("Motivo da falha")}: {_e(lead.get("last_error"))}</div>' if lead.get("delivery") == "falhou" and lead.get("last_error") else ""}
       </div>
