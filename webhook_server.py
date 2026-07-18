@@ -1369,12 +1369,16 @@ def _panel_sections():
         chips = "".join(f'<span class="chip chip-muted mini">{_e(t)}</span>' for t in alltags[:3])
         if len(alltags) > 3:
             chips += f'<span class="tag-more">+{len(alltags) - 3}</span>'
+        # The delivery chip is only worth showing once something has been sent.
+        # A "pendente" delivery just repeats the Pendentes column header, so skip it.
+        deliv = lead.get("delivery", "pendente")
+        foot = f'<div class="kanban-foot">{_delivery_chip(deliv)}</div>' if deliv != "pendente" else ""
         return f"""
         <div class="kanban-card" data-search="{haystack}">
           <a class="contact-link" href="/contato/{_e(phone)}">{_e(lead.get('nome') or '(sem nome)')}</a>
           <div class="row-tags">{chips}</div>
           <div class="kanban-phone">{_e(phone)}</div>
-          <div class="kanban-foot">{_delivery_chip(lead.get('delivery', 'pendente'))}</div>
+          {foot}
         </div>"""
 
     by_stage = {}
