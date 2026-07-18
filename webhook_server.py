@@ -356,6 +356,19 @@ def contato_etapa(phone):
     return redirect(f"/contato/{phone}")
 
 
+@app.route("/board/etapa", methods=["POST"])
+@_requires_auth
+def board_etapa():
+    # drag-and-drop stage change on the board; returns no body (AJAX)
+    phone = request.form.get("phone", "")
+    stage = request.form.get("stage", "")
+    if stage in lead_store.STAGES and lead_store.get_lead(phone):
+        lead_store.set_stage(phone, stage)
+        events.bump()  # push the move to every open panel
+        return ("", 204)
+    return ("invalid", 400)
+
+
 @app.route("/contato/<phone>/tag", methods=["POST"])
 @_requires_auth
 def contato_tag_add(phone):
@@ -538,6 +551,53 @@ window.hideState = function () {
   var m = document.getElementById('state-modal'); if (m) m.hidden = true;
 };
 document.addEventListener('keydown', function (e) { if (e.key === 'Escape') window.hideState(); });
+
+// Drag a card between columns to change its stage. Delegated on document so it
+// keeps working after the live refresh swaps the board's HTML.
+(function () {
+  var dragPhone = null;
+  document.addEventListener('dragstart', function (e) {
+    var card = e.target.closest && e.target.closest('.kanban-card');
+    if (!card) return;
+    dragPhone = card.getAttribute('data-phone');
+    card.classList.add('dragging');
+    try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', dragPhone); } catch (err) {}
+  });
+  document.addEventListener('dragend', function (e) {
+    var card = e.target.closest && e.target.closest('.kanban-card');
+    if (card) card.classList.remove('dragging');
+    document.querySelectorAll('.board-col-body.drop-hover').forEach(function (b) { b.classList.remove('drop-hover'); });
+  });
+  document.addEventListener('dragover', function (e) {
+    var body = e.target.closest && e.target.closest('.board-col-body');
+    if (!body) return;
+    e.preventDefault();
+    try { e.dataTransfer.dropEffect = 'move'; } catch (err) {}
+    body.classList.add('drop-hover');
+  });
+  document.addEventListener('dragleave', function (e) {
+    var body = e.target.closest && e.target.closest('.board-col-body');
+    if (body && !body.contains(e.relatedTarget)) body.classList.remove('drop-hover');
+  });
+  document.addEventListener('drop', function (e) {
+    var body = e.target.closest && e.target.closest('.board-col-body');
+    if (!body) return;
+    e.preventDefault();
+    body.classList.remove('drop-hover');
+    var phone = dragPhone || (e.dataTransfer && e.dataTransfer.getData('text/plain'));
+    dragPhone = null;
+    var stage = body.getAttribute('data-stage');
+    if (!phone || !stage) return;
+    var card = document.querySelector('.kanban-card[data-phone="' + phone + '"]');
+    if (card) {
+      if (card.parentNode === body) return;  // same column, nothing to do
+      var empty = body.querySelector('.board-empty'); if (empty) empty.remove();
+      body.appendChild(card);  // optimistic move; the push refresh reconciles counts
+    }
+    var fd = new FormData(); fd.append('phone', phone); fd.append('stage', stage);
+    fetch('/board/etapa', { method: 'POST', body: fd, credentials: 'same-origin' }).catch(function () {});
+  });
+})();
 </script>
 """
 
@@ -930,6 +990,11 @@ _SHARED_CSS = """<style>
   .kanban-card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
                  padding: 12px; box-shadow: var(--shadow); transition: border-color .12s ease, transform .12s ease; }
   .kanban-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .kanban-card { cursor: grab; }
+  .kanban-card:active { cursor: grabbing; }
+  .kanban-card.dragging { opacity: 0.45; }
+  .board-col-body.drop-hover { outline: 2px dashed var(--accent); outline-offset: -4px; border-radius: 8px;
+                               background: rgba(42,120,214,0.08); }
   .kanban-phone { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; margin-top: 4px; }
   .kanban-email { font-size: 12px; color: var(--text-muted); margin-top: 2px; word-break: break-all; }
   .kanban-foot { margin-top: 8px; }
@@ -1241,10 +1306,6 @@ def _render_contact(lead):
         f"</span>" for t in manual
     ) or f'<span class="muted-text">{T("Nenhuma tag manual.")}</span>'
 
-    stage_opts = "".join(
-        f'<option value="{sk}"{" selected" if lead["stage"] == sk else ""}>{_e(T(STAGE_LABELS.get(sk, sk)))}</option>'
-        for sk in lead_store.STAGES
-    )
     signals_html = "".join(
         f'<div><span class="signal-label">{T(lbl)}</span>{_e(s.get(k) or "-")}</div>'
         for k, lbl in [("objetivo", "Objetivo"), ("experiencia", "Experiencia"),
@@ -1282,16 +1343,6 @@ def _render_contact(lead):
       <form method="post" action="/contato/{_e(phone)}/tag" class="inline-form">
         <input class="search inline-input" type="text" name="tag" placeholder="{T("Nova tag...")}" maxlength="40" required>
         <button class="btn btn-ghost" type="submit">{T("Adicionar")}</button>
-      </form>
-    </div>
-  </section>
-
-  <section>
-    <h2>{T("Etapa")}</h2>
-    <div class="panel-box">
-      <form method="post" action="/contato/{_e(phone)}/etapa" class="inline-form">
-        <select class="select" name="stage">{stage_opts}</select>
-        <button class="btn btn-ghost" type="submit">{T("Atualizar etapa")}</button>
       </form>
     </div>
   </section>
@@ -1477,8 +1528,8 @@ def _panel_sections():
             reason = f'<div class="kanban-error">{_e(err)}</div>' if (deliv == "falhou" and err) else ""
             foot = f'<div class="kanban-foot">{_delivery_chip(deliv, err if deliv == "falhou" else None)}</div>{reason}'
         return f"""
-        <div class="kanban-card" data-search="{haystack}">
-          <a class="contact-link" href="/contato/{_e(phone)}">{_e(lead.get('nome') or T('(sem nome)'))}</a>
+        <div class="kanban-card" draggable="true" data-phone="{_e(phone)}" data-search="{haystack}">
+          <a class="contact-link" draggable="false" href="/contato/{_e(phone)}">{_e(lead.get('nome') or T('(sem nome)'))}</a>
           <div class="row-tags">{chips}</div>
           <div class="kanban-phone">{_e(phone)}</div>
           {email_line}
@@ -1496,7 +1547,7 @@ def _panel_sections():
         cols_html += f"""
         <div class="board-col {cls}">
           <div class="board-col-head"><span class="board-col-title">{T(label)}{_info_btn(key)}</span><span class="board-col-count">{len(col_leads)}</span></div>
-          <div class="board-col-body">{inner}</div>
+          <div class="board-col-body" data-stage="{key}">{inner}</div>
         </div>"""
 
     if not leads:
