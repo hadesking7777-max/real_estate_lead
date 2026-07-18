@@ -18,6 +18,7 @@ Then expose this publicly (ngrok, a small VPS, etc.) and subscribe the URL
 Give Lucas the same public URL + /painel, plus PANEL_USER/PANEL_PASSWORD.
 """
 
+import hashlib
 import html
 import os
 import time
@@ -25,7 +26,7 @@ import uuid
 from datetime import datetime, timedelta
 from functools import wraps
 
-from flask import Flask, request, jsonify, Response, redirect
+from flask import Flask, request, jsonify, redirect, session
 
 import lead_store
 import qualification
@@ -39,6 +40,12 @@ app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8 MB cap on uploads
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "changeme")
 PANEL_USER = os.environ.get("PANEL_USER", "lucas")
 PANEL_PASSWORD = os.environ.get("PANEL_PASSWORD", "changeme")
+# Stable session-signing secret derived from the panel credentials (survives
+# restarts without a separate env var; changes only if the password changes).
+app.secret_key = hashlib.sha256(
+    (PANEL_USER + PANEL_PASSWORD + "bidcyrela-session-v1").encode()
+).hexdigest()
+app.permanent_session_lifetime = timedelta(days=7)
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -68,17 +75,50 @@ DELIVERY_LABELS = {
 }
 
 
+def _creds_ok(user, pw):
+    return user == PANEL_USER and pw == PANEL_PASSWORD
+
+
 def _requires_auth(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
+        if session.get("auth"):
+            return f(*args, **kwargs)
+        # Programmatic clients (and tests) may still use HTTP Basic auth.
         auth = request.authorization
-        if not auth or auth.username != PANEL_USER or auth.password != PANEL_PASSWORD:
-            return Response(
-                "Login necessario", 401, {"WWW-Authenticate": 'Basic realm="Painel"'}
-            )
-        return f(*args, **kwargs)
+        if auth and _creds_ok(auth.username, auth.password):
+            return f(*args, **kwargs)
+        return redirect("/login?next=" + request.path)
 
     return wrapper
+
+
+def _safe_next(nxt):
+    # prevent open-redirect: only same-site absolute paths
+    return nxt if (nxt.startswith("/") and not nxt.startswith("//")) else "/painel"
+
+
+@app.route("/login", methods=["GET"])
+def login():
+    if session.get("auth"):
+        return redirect("/painel")
+    return _render_login(next_url=_safe_next(request.args.get("next", "/painel")))
+
+
+@app.route("/login", methods=["POST"])
+def login_post():
+    nxt = _safe_next(request.form.get("next", "/painel"))
+    if _creds_ok(request.form.get("usuario", ""), request.form.get("senha", "")):
+        session.permanent = True
+        session["auth"] = True
+        return redirect(nxt)
+    return _render_login(error="Usuario ou senha invalidos.", next_url=nxt), 401
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/login")
 
 
 @app.route("/webhook", methods=["GET"])
@@ -566,6 +606,31 @@ _SHARED_CSS = """<style>
   .btn-ghost:hover { background: var(--page); color: var(--text-primary); }
   .form-actions { display: flex; justify-content: flex-end; margin-top: 20px; }
   .form-actions .btn { margin-right: 0; }
+
+  .nav-spacer { flex: 1; }
+  .nav-logout { color: var(--text-muted); }
+  .nav-logout:hover { color: var(--status-bad); }
+
+  .login-body { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px;
+                background:
+                  radial-gradient(1200px 500px at 50% -10%, var(--status-info-bg), transparent 70%),
+                  var(--page); }
+  .login-card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 16px;
+                padding: 32px 28px; width: 100%; max-width: 360px; box-shadow: var(--shadow-lg); text-align: center; }
+  .login-brand { width: 48px; height: 48px; border-radius: 13px; background: var(--accent); color: #fff;
+                 display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 18px;
+                 letter-spacing: 0.5px; margin: 0 auto 14px; }
+  .login-title { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
+  .login-sub { margin: 4px 0 22px; font-size: 13px; color: var(--text-muted); }
+  .login-label { display: block; text-align: left; font-size: 12px; color: var(--text-secondary);
+                 font-weight: 600; margin: 12px 0 6px; }
+  .login-input { width: 100%; padding: 11px 13px; border-radius: 9px; border: 1px solid var(--border);
+                 background: var(--page); color: var(--text-primary); font-size: 14px;
+                 transition: border-color .15s ease, box-shadow .15s ease; }
+  .login-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--status-info-bg); }
+  .login-btn { width: 100%; margin-top: 18px; margin-right: 0; }
+  .login-error { background: var(--status-bad-bg); color: var(--status-bad); font-size: 13px;
+                 padding: 10px 12px; border-radius: 8px; margin-bottom: 6px; text-align: left; }
   .campaign-box { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
                   padding: 16px 20px; box-shadow: var(--shadow); display: flex; align-items: center;
                   justify-content: space-between; gap: 14px; flex-wrap: wrap; }
@@ -700,7 +765,33 @@ def _nav(active):
             + item("/painel", "Funil e contatos", "painel", _NAV_ICON_FUNNEL)
             + item("/resultados", "Resultados", "resultados", _NAV_ICON_RESULTS)
             + item("/importar", "Importar base", "importar", _NAV_ICON_IMPORT)
+            + '<span class="nav-spacer"></span>'
+            + '<a class="nav-item nav-logout" href="/logout">Sair</a>'
             + "</div></nav>")
+
+
+def _render_login(error=None, next_url="/painel"):
+    err = f'<div class="login-error">{_e(error)}</div>' if error else ""
+    return (
+        '<!doctype html><html lang="pt-br"><head>'
+        '<meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<title>Entrar &middot; Guerra Cyrela</title>'
+        + _SHARED_CSS
+        + '</head><body class="login-body"><div class="login-card">'
+        '<div class="login-brand">GC</div>'
+        '<h1 class="login-title">Guerra Cyrela</h1>'
+        '<p class="login-sub">Painel de reativacao</p>'
+        + err
+        + '<form method="post" action="/login">'
+        f'<input type="hidden" name="next" value="{_e(next_url)}">'
+        '<label class="login-label">Usuario</label>'
+        '<input class="login-input" type="text" name="usuario" autocomplete="username" autofocus required>'
+        '<label class="login-label">Senha</label>'
+        '<input class="login-input" type="password" name="senha" autocomplete="current-password" required>'
+        '<button class="btn btn-primary login-btn" type="submit">Entrar</button>'
+        '</form></div></body></html>'
+    )
 
 
 def _page(title, subtitle, active, body):
@@ -1192,4 +1283,6 @@ def _render_import_done(imported, skipped, include_intl, n_intl):
 
 if __name__ == "__main__":
     scheduler.start_background()
-    app.run(host="0.0.0.0", port=8000)
+    # Bind to localhost so the app is reachable only through nginx (the HTTPS
+    # domain), not directly on the raw IP:8000. Override with BIND_HOST if needed.
+    app.run(host=os.environ.get("BIND_HOST", "127.0.0.1"), port=8000)
