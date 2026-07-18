@@ -356,8 +356,14 @@ def contato(phone):
 @_requires_auth
 def contato_etapa(phone):
     stage = request.form.get("stage", "")
-    if stage in lead_store.STAGES and lead_store.get_lead(phone):
-        lead_store.set_stage(phone, stage)
+    lead = lead_store.get_lead(phone)
+    if stage in lead_store.STAGES and lead:
+        who = PANEL_USER
+        lead_store.set_stage(phone, stage, actor=who, source="manual")
+        deliv = _delivery_for_stage(stage, lead.get("delivery") or "pendente")
+        if deliv and deliv != lead.get("delivery"):
+            lead_store.set_delivery(phone, deliv, actor=who, source="manual")
+        events.bump()
     return redirect(f"/contato/{phone}")
 
 
@@ -1214,6 +1220,9 @@ _SHARED_CSS = """<style>
   .contact-sub { font-size: 13px; color: var(--text-muted); margin-top: 4px; font-variant-numeric: tabular-nums; }
   .contact-chips { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
   .contact-wa { margin: 0; padding: 8px 14px; font-size: 13px; flex-shrink: 0; }
+  .stage-form { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 16px; width: 100%; }
+  .stage-form-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-muted); font-weight: 700; }
+  .stage-form .select { flex: 1; min-width: 140px; }
   .tag-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
   .tag-group-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-muted); font-weight: 700; min-width: 90px; }
   .tag-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600;
@@ -1660,6 +1669,11 @@ def _render_contact(lead):
         f'<span>{_e(n["text"])}</span></div>' for n in notes
     ) or f'<div class="empty-state">{T("Nenhuma nota ainda.")}</div>'
 
+    stage_opts = "".join(
+        f'<option value="{sk}"{" selected" if lead["stage"] == sk else ""}>{_e(T(STAGE_LABELS.get(sk, sk)))}</option>'
+        for sk in lead_store.STAGES
+    )
+
     body = f"""
   <a class="back-link" href="/painel">&larr; {T("Voltar ao painel")}</a>
   <section>
@@ -1679,6 +1693,11 @@ def _render_contact(lead):
           <a class="btn btn-primary contact-wa" href="https://wa.me/{_e(phone)}" target="_blank" rel="noopener">{T("Abrir no WhatsApp")}</a>
         </div>
         {f'<div class="alert alert-bad">{T("Motivo da falha")}: {_e(lead.get("last_error"))}</div>' if lead.get("delivery") == "falhou" and lead.get("last_error") else ""}
+        <form class="stage-form" method="post" action="/contato/{_e(phone)}/etapa">
+          <span class="stage-form-label">{T("Etapa")}</span>
+          <select class="select" name="stage">{stage_opts}</select>
+          <button class="btn btn-ghost" type="submit">{T("Atualizar etapa")}</button>
+        </form>
       </div>
 
       <div class="combined-cell">
