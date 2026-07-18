@@ -40,6 +40,7 @@ import events
 import i18n
 from i18n import T
 import logo_assets
+import templates
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8 MB cap on uploads
@@ -1069,7 +1070,7 @@ _SHARED_CSS = """<style>
   .tl-out { align-self: flex-end; text-align: right; }
   .tl-who { font-size: 11px; color: var(--text-muted); margin-bottom: 3px; }
   .tl-bubble { display: inline-block; padding: 10px 13px; border-radius: 12px; font-size: 13px; line-height: 1.4;
-               border: 1px solid var(--border); background: var(--surface-1); text-align: left; }
+               border: 1px solid var(--border); background: var(--surface-1); text-align: left; white-space: pre-line; }
   .tl-out .tl-bubble { background: var(--status-info-bg); border-color: transparent; }
   .alert { padding: 12px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 14px; }
   .alert-good { color: var(--status-good); background: var(--status-good-bg); }
@@ -1384,14 +1385,23 @@ def _timeline_html(lead):
     items = ""
     kind_labels = {"opener": T("Abertura enviada"), "followup1": T("Follow-up 1 enviado"),
                    "followup2": T("Follow-up 2 enviado"), "template": T("Mensagem enviada")}
+    first = (lead.get("nome") or "").strip().split(" ")[0]
     for h in lead["history"]:
         role, text = h["role"], (h["text"] or "")
         if role == "bot" and text.startswith("["):
             inner = text.strip("[]")
             kind = inner.split(":")[0]
             tmpl = inner.split(":", 1)[1] if ":" in inner else ""
-            items += (f'<div class="tl-system">{kind_labels.get(kind, T("Mensagem enviada"))}'
-                      f'<span class="tl-tmpl">{_e(tmpl)}</span></div>')
+            label = kind_labels.get(kind, T("Mensagem enviada"))
+            body = templates.render(tmpl, first)
+            if body:
+                # show the real message that was sent, as an outbound bubble
+                items += (f'<div class="tl-msg tl-out"><div class="tl-who">{label}'
+                          f'<span class="tl-tmpl">{_e(tmpl)}</span></div>'
+                          f'<div class="tl-bubble">{_e(body)}</div></div>')
+            else:
+                items += (f'<div class="tl-system">{label}'
+                          f'<span class="tl-tmpl">{_e(tmpl)}</span></div>')
         elif role == "lead":
             items += (f'<div class="tl-msg tl-in"><div class="tl-who">{T("Investidor")}</div>'
                       f'<div class="tl-bubble">{_e(text)}</div></div>')
