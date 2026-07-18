@@ -205,6 +205,13 @@ def painel():
     return _render_panel_html()
 
 
+@app.route("/painel/fragmento")
+@_requires_auth
+def painel_fragmento():
+    # inner content only, for the live refresh loop to swap into <main>
+    return _panel_sections()
+
+
 @app.route("/resultados")
 def resultados():
     # merged into /painel; keep the route as a redirect for old bookmarks
@@ -369,29 +376,43 @@ _INFO_MODAL_HTML = """
     </div>
   </div>"""
 
-# Live-polls the campaign status while a batch is sending, updating the progress
-# bar and counts in place; reloads the page once the batch finishes.
-_CAMPAIGN_JS = """
+# Live panel refresh: re-fetches the panel content every few seconds and swaps
+# it in place, so every section (campaign progress, funnel, rates, chart, hot
+# leads, board) reflects the campaign in real time. Preserves the search text
+# and scroll, and skips a cycle while the user is typing or a modal is open.
+_LIVE_JS = """
 <script>
 (function () {
-  var box = document.getElementById('campaign-box');
-  if (!box || box.getAttribute('data-sending') !== '1') return;
-  function poll() {
-    fetch('/campanha/status', {credentials: 'same-origin'})
-      .then(function (r) { return r.json(); })
-      .then(function (s) {
-        if (s.status !== 'running' || s.remaining <= 0) { window.location.reload(); return; }
-        var chip = document.getElementById('camp-chip');
-        if (chip) chip.innerHTML = 'Enviando \\u00b7 faltam ' + s.remaining;
-        var m = document.getElementById('camp-metrics');
-        if (m) m.innerHTML = 'Total enviados ' + s.total_enviados + ' \\u00b7 Pendentes ' + s.pendentes;
-        var bar = document.getElementById('camp-progress-bar');
-        if (bar && s.total) bar.style.width = Math.round((s.total - s.remaining) / s.total * 100) + '%';
-        setTimeout(poll, 3000);
-      })
-      .catch(function () { setTimeout(poll, 5000); });
+  var REFRESH_MS = 4000;
+  function busy() {
+    var ae = document.activeElement;
+    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT')) return true;
+    var sm = document.getElementById('state-modal'); if (sm && !sm.hidden) return true;
+    var pm = document.getElementById('pwd-modal'); if (pm && !pm.hidden) return true;
+    return false;
   }
-  setTimeout(poll, 3000);
+  function schedule() { setTimeout(refresh, REFRESH_MS); }
+  function refresh() {
+    if (busy()) { schedule(); return; }
+    var main = document.querySelector('main');
+    var s0 = document.querySelector('.search');
+    var q = s0 ? s0.value : '';
+    var sy = window.scrollY;
+    fetch('/painel/fragmento', {credentials: 'same-origin'})
+      .then(function (r) { if (!r.ok) throw 0; return r.text(); })
+      .then(function (html) {
+        if (main) {
+          main.innerHTML = html;
+          var s1 = document.querySelector('.search');
+          if (s1) s1.value = q;
+          if (window.filterRows) window.filterRows(q);
+          window.scrollTo(0, sy);
+        }
+        schedule();
+      })
+      .catch(function () { schedule(); });
+  }
+  schedule();
 })();
 </script>"""
 
@@ -1208,10 +1229,10 @@ def _render_campaign():
       </div>
       {progress}
     </div>
-  </section>{_CAMPAIGN_JS}"""
+  </section>"""
 
 
-def _render_panel_html():
+def _panel_sections():
     counts = lead_store.funnel_counts()
     deliv = lead_store.delivery_counts()
     hot = lead_store.hot_leads()
@@ -1324,15 +1345,18 @@ def _render_panel_html():
     cm = conta_map.get(request.args.get("conta"))
     toast = f'<div class="alert alert-{cm[0]}">{cm[1]}</div>' if cm else ""
 
-    body = toast + _render_campaign() + f"""
+    return toast + _render_campaign() + f"""
   <section><h2>Funil</h2><div class="funnel">{funnel_rows}</div></section>
   <section><h2>Taxas de conversao</h2><div class="tiles">{rate_tiles}</div></section>
   <section><h2>Envios por dia</h2>{_daily_sends_chart()}</section>
   <section><h2>Leads quentes ({len(hot)})</h2>{cards}</section>
   <section><h2>Contatos por status ({len(leads)})</h2>{board_section}</section>
-  """ + _INFO_MODAL_HTML + _BOARD_JS
+  """ + _INFO_MODAL_HTML
 
-    return _page("Painel Guerra Cyrela", "Painel do piloto de reativacao", "painel", body)
+
+def _render_panel_html():
+    return _page("Painel Guerra Cyrela", "Painel do piloto de reativacao", "painel",
+                 _panel_sections() + _BOARD_JS + _LIVE_JS)
 
 
 _UPLOAD_ICON = (
