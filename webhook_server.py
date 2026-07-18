@@ -983,7 +983,7 @@ _SHARED_CSS = """<style>
     --border: rgba(11,11,11,0.10);
     --status-good: #0ca30c; --status-good-bg: #e6f6e6;
     --status-info: #2a78d6; --status-info-bg: #e6effb;
-    --status-warning: #fab219;
+    --status-warning: #fab219; --status-warning-bg: #fdf1d8;
     --status-bad: #d03b3b; --status-bad-bg: #fbe9e9;
     --accent: #2a78d6; --accent-ink: #ffffff;
     --header-bg: #0d366b; --nav-bg: #fcfcfb;
@@ -998,7 +998,7 @@ _SHARED_CSS = """<style>
       --border: rgba(255,255,255,0.10);
       --status-good: #0ca30c; --status-good-bg: rgba(12,163,12,0.15);
       --status-info: #3987e5; --status-info-bg: rgba(57,135,229,0.15);
-      --status-warning: #fab219;
+      --status-warning: #fab219; --status-warning-bg: rgba(250,178,25,0.16);
       --status-bad: #e66767; --status-bad-bg: rgba(208,59,59,0.18);
       --accent: #3987e5; --accent-ink: #ffffff;
       --header-bg: #184f95; --nav-bg: #1a1a19;
@@ -1013,7 +1013,7 @@ _SHARED_CSS = """<style>
     --border: rgba(255,255,255,0.10);
     --status-good: #0ca30c; --status-good-bg: rgba(12,163,12,0.15);
     --status-info: #3987e5; --status-info-bg: rgba(57,135,229,0.15);
-    --status-warning: #fab219;
+    --status-warning: #fab219; --status-warning-bg: rgba(250,178,25,0.16);
     --status-bad: #e66767; --status-bad-bg: rgba(208,59,59,0.18);
     --accent: #3987e5; --accent-ink: #ffffff;
     --header-bg: #184f95; --nav-bg: #1a1a19;
@@ -1284,6 +1284,9 @@ _SHARED_CSS = """<style>
   .kanban-foot { margin-top: 8px; }
   .kanban-error { margin-top: 5px; font-size: 11px; line-height: 1.35; color: var(--status-bad);
                   word-break: break-word; }
+  .kanban-warn { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 999px;
+                 font-size: 11px; font-weight: 600; color: var(--status-warning);
+                 background: var(--status-warning-bg); border: 1px solid var(--status-warning); cursor: help; }
   .board-empty { color: var(--text-muted); font-size: 12px; text-align: center; padding: 16px 8px; }
 
   .info-btn { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--border);
@@ -1380,6 +1383,14 @@ _DELIVERY_CHIP = {
     "pendente": "chip-muted", "enviado": "chip-info", "entregue": "chip-info",
     "lido": "chip-good", "respondeu": "chip-good", "falhou": "chip-bad",
 }
+
+
+_WARN_ICON = (
+    '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" '
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>'
+    '<line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>'
+)
 
 
 def _delivery_chip(state, title=None):
@@ -1866,6 +1877,11 @@ def _panel_sections():
         if lead.get("stage") == "contatado" and deliv != "pendente":
             reason = f'<div class="kanban-error">{_e(err)}</div>' if (deliv == "falhou" and err) else ""
             foot = f'<div class="kanban-foot">{_delivery_chip(deliv, err if deliv == "falhou" else None)}</div>{reason}'
+        elif lead.get("stage") == "pendente" and lead.get("last_send_ts"):
+            # in Pending but already messaged -> almost certainly moved here by mistake
+            foot = (f'<div class="kanban-foot"><span class="kanban-warn" '
+                    f'title="{T("Este contato ja recebeu a mensagem, mas esta em Pendentes. Provavelmente foi movido por engano.")}">'
+                    f'{_WARN_ICON}{T("Ja enviado")}</span></div>')
         nome = lead.get('nome') or T('(sem nome)')
         return f"""
         <div class="kanban-card" draggable="true" data-phone="{_e(phone)}" data-search="{haystack}">

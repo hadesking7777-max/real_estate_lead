@@ -141,6 +141,9 @@ EN = {
     "Nenhuma mudanca de estado ainda.": "No state changes yet.",
     "Excluir contato": "Delete contact",
     "Excluir": "Delete",
+    "Ja enviado": "Already sent",
+    "Este contato ja recebeu a mensagem, mas esta em Pendentes. Provavelmente foi movido por engano.":
+        "This contact was already messaged but is in Pending, it was probably moved here by mistake.",
     "Tem certeza que deseja excluir": "Are you sure you want to delete",
     "Esta acao nao pode ser desfeita.": "This action cannot be undone.",
     "Automatico": "Automatic",
@@ -276,6 +279,8 @@ PT = {
     "Motivo da falha": "Motivo da falha",
     "Excluir contato": "Eliminar contacto",
     "Excluir": "Eliminar",
+    "Este contato ja recebeu a mensagem, mas esta em Pendentes. Provavelmente foi movido por engano.":
+        "Este contacto ja recebeu a mensagem, mas esta em Pendentes. Provavelmente foi movido por engano.",
     "Tem certeza que deseja excluir": "Tem a certeza de que deseja eliminar",
     "Qual o status do envio?": "Qual o estado do envio?",
     "Escolha como marcar este contato na coluna Contatados.": "Escolha como marcar este contacto na coluna Contactados.",
