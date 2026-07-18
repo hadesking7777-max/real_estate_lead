@@ -195,6 +195,19 @@ def _handle_status(status):
     mapped = _WA_STATUS_MAP.get(wa_state)
     if phone and mapped:
         lead_store.advance_delivery(phone, mapped)
+        if wa_state == "failed":
+            # keep WhatsApp's own error reason so the panel can show WHY it failed
+            errs = status.get("errors") or []
+            if errs:
+                e = errs[0]
+                detail = (e.get("error_data") or {}).get("details") or ""
+                reason = f"{e.get('code')}: {e.get('title') or ''}"
+                if detail:
+                    reason += f" - {detail}"
+                try:
+                    lead_store.update_lead(phone, last_error=reason[:400])
+                except Exception:  # noqa: BLE001 - never let logging break the webhook
+                    pass
         events.bump()  # delivery status changed; push to open panels
 
 
@@ -920,6 +933,8 @@ _SHARED_CSS = """<style>
   .kanban-phone { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; margin-top: 4px; }
   .kanban-email { font-size: 12px; color: var(--text-muted); margin-top: 2px; word-break: break-all; }
   .kanban-foot { margin-top: 8px; }
+  .kanban-error { margin-top: 5px; font-size: 11px; line-height: 1.35; color: var(--status-bad);
+                  word-break: break-word; }
   .board-empty { color: var(--text-muted); font-size: 12px; text-align: center; padding: 16px 8px; }
 
   .info-btn { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--border);
@@ -1018,9 +1033,10 @@ _DELIVERY_CHIP = {
 }
 
 
-def _delivery_chip(state):
+def _delivery_chip(state, title=None):
     cls = _DELIVERY_CHIP.get(state, "chip-muted")
-    return f'<span class="chip {cls}">{T(DELIVERY_LABELS.get(state, state))}</span>'
+    tip = f' title="{_e(title)}"' if title else ""
+    return f'<span class="chip {cls}"{tip}>{T(DELIVERY_LABELS.get(state, state))}</span>'
 
 
 _NAV_ICON_FUNNEL = (
@@ -1251,10 +1267,11 @@ def _render_contact(lead):
       <div class="contact-chips">
         <span class="chip chip-muted">{_e(lead["perfil"])}</span>
         <span class="chip chip-info">{_e(T(STAGE_LABELS.get(lead["stage"], lead["stage"])))}</span>
-        {_delivery_chip(lead.get("delivery", "pendente"))}
+        {_delivery_chip(lead.get("delivery", "pendente"), lead.get("last_error"))}
         <a class="btn btn-primary" href="https://wa.me/{_e(phone)}" target="_blank" rel="noopener">{T("Abrir no WhatsApp")}</a>
       </div>
     </div>
+    {f'<div class="alert alert-bad">{T("Motivo da falha")}: {_e(lead.get("last_error"))}</div>' if lead.get("delivery") == "falhou" and lead.get("last_error") else ""}
   </section>
 
   <section>
@@ -1454,7 +1471,11 @@ def _panel_sections():
         # The delivery chip is only worth showing once something has been sent.
         # A "pendente" delivery just repeats the Pendentes column header, so skip it.
         deliv = lead.get("delivery", "pendente")
-        foot = f'<div class="kanban-foot">{_delivery_chip(deliv)}</div>' if deliv != "pendente" else ""
+        err = lead.get("last_error") or ""
+        foot = ""
+        if deliv != "pendente":
+            reason = f'<div class="kanban-error">{_e(err)}</div>' if (deliv == "falhou" and err) else ""
+            foot = f'<div class="kanban-foot">{_delivery_chip(deliv, err if deliv == "falhou" else None)}</div>{reason}'
         return f"""
         <div class="kanban-card" data-search="{haystack}">
           <a class="contact-link" href="/contato/{_e(phone)}">{_e(lead.get('nome') or T('(sem nome)'))}</a>

@@ -126,6 +126,13 @@ def tick(now=None, sender=None):
         return {"action": "sent", "phone": lead["phone"], "template": template, "remaining": new_remaining}
 
     lead_store.advance_delivery(lead["phone"], "falhou")
+    try:  # keep the API error reason so the panel can show WHY it failed
+        import json
+        err = (json.loads(resp) or {}).get("error", {})
+        detail = (err.get("error_data") or {}).get("details") or err.get("message") or ""
+        lead_store.update_lead(lead["phone"], last_error=f"{err.get('code')}: {detail}"[:400])
+    except Exception:  # noqa: BLE001
+        pass
     streak = (camp["fail_streak"] or 0) + 1
     fields = {"fail_streak": streak}
     if streak >= MAX_FAIL_STREAK:

@@ -30,7 +30,8 @@ SIGNAL_KEYS = ["objetivo", "experiencia", "forma_pagamento", "quantidade_unidade
 
 # Columns update_lead is allowed to write directly (signals handled separately; phone is the key).
 _WRITABLE_COLS = ["nome", "email", "perfil", "origem", "pais", "stage", "delivery",
-                  "last_template_used", "last_wamid", "followup_count", "last_send_ts"]
+                  "last_template_used", "last_wamid", "followup_count", "last_send_ts",
+                  "last_error"]
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS leads (
@@ -130,6 +131,8 @@ def _migrate_schema(conn):
         conn.execute("ALTER TABLE leads ADD COLUMN last_send_ts REAL")
     if "email" not in cols:
         conn.execute("ALTER TABLE leads ADD COLUMN email TEXT")
+    if "last_error" not in cols:
+        conn.execute("ALTER TABLE leads ADD COLUMN last_error TEXT")
     camp_cols = {r["name"] for r in conn.execute("PRAGMA table_info(campaign)")}
     if "manual_remaining" not in camp_cols:
         conn.execute("ALTER TABLE campaign ADD COLUMN manual_remaining INTEGER DEFAULT 0")
@@ -191,6 +194,7 @@ def _row_to_lead(conn, row, with_history=True):
         "last_wamid": row["last_wamid"],
         "followup_count": row["followup_count"] or 0,
         "last_send_ts": row["last_send_ts"],
+        "last_error": (row["last_error"] if "last_error" in row.keys() else "") or "",
         "history": [],
     }
     if with_history:
