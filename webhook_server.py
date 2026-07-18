@@ -1737,11 +1737,6 @@ def _render_contact(lead):
         f'<span>{_e(n["text"])}</span></div>' for n in notes
     ) or f'<div class="empty-state">{T("Nenhuma nota ainda.")}</div>'
 
-    stage_opts = "".join(
-        f'<option value="{sk}"{" selected" if lead["stage"] == sk else ""}>{_e(T(STAGE_LABELS.get(sk, sk)))}</option>'
-        for sk in lead_store.STAGES
-    )
-
     body = f"""
   <a class="back-link" href="/painel">&larr; {T("Voltar ao painel")}</a>
   <section>
@@ -1761,11 +1756,6 @@ def _render_contact(lead):
           <a class="btn btn-primary contact-wa" href="https://wa.me/{_e(phone)}" target="_blank" rel="noopener">{T("Abrir no WhatsApp")}</a>
         </div>
         {f'<div class="alert alert-bad">{T("Motivo da falha")}: {_e(lead.get("last_error"))}</div>' if lead.get("delivery") == "falhou" and lead.get("last_error") else ""}
-        <form class="stage-form" method="post" action="/contato/{_e(phone)}/etapa">
-          <span class="stage-form-label">{T("Etapa")}</span>
-          <select class="select" name="stage">{stage_opts}</select>
-          <button class="btn btn-ghost" type="submit">{T("Atualizar etapa")}</button>
-        </form>
       </div>
 
       <div class="combined-cell">
