@@ -135,6 +135,8 @@ EN = {
     "Contato nao encontrado.": "Contact not found.",
     "Abrir no WhatsApp": "Open in WhatsApp",
     "Motivo da falha": "Failure reason",
+    "Qual o status do envio?": "What is the delivery status?",
+    "Escolha como marcar este contato na coluna Contatados.": "Choose how to mark this contact in the Contacted column.",
     "Tags": "Tags",
     "Automaticas": "Automatic",
     "Manuais": "Manual",
@@ -262,6 +264,8 @@ PT = {
     "Contato nao encontrado.": "Contacto nao encontrado.",
     "Nova tag...": "Nova etiqueta...",
     "Motivo da falha": "Motivo da falha",
+    "Qual o status do envio?": "Qual o estado do envio?",
+    "Escolha como marcar este contato na coluna Contatados.": "Escolha como marcar este contacto na coluna Contactados.",
     "Importar planilha de contatos": "Importar folha de calculo de contactos",
     "Envie a planilha (.xlsx) com as colunas nome, telefone e email. A gente analisa, remove duplicados e mostra um resumo antes de importar de verdade.":
         "Envie a folha de calculo (.xlsx) com as colunas nome, telefone e email. Analisamos, removemos duplicados e mostramos um resumo antes de importar a serio.",

@@ -368,18 +368,27 @@ def _delivery_for_stage(stage, current):
     return "respondeu"
 
 
+# Delivery tags the operator can choose when moving a card into Contacted.
+CONTACTED_DELIVERY_CHOICES = ["enviado", "entregue", "lido", "falhou"]
+
+
 @app.route("/board/etapa", methods=["POST"])
 @_requires_auth
 def board_etapa():
     # drag-and-drop stage change on the board; returns no body (AJAX)
     phone = request.form.get("phone", "")
     stage = request.form.get("stage", "")
+    chosen = request.form.get("delivery", "")
     lead = lead_store.get_lead(phone) if phone else None
     if stage in lead_store.STAGES and lead:
         lead_store.set_stage(phone, stage)
-        deliv = _delivery_for_stage(stage, lead.get("delivery") or "pendente")
-        if deliv and deliv != lead.get("delivery"):
-            lead_store.update_lead(phone, delivery=deliv)
+        if chosen in DELIVERY_LABELS:
+            # explicit tag picked in the modal (used when dropping into Contacted)
+            lead_store.update_lead(phone, delivery=chosen)
+        else:
+            deliv = _delivery_for_stage(stage, lead.get("delivery") or "pendente")
+            if deliv and deliv != lead.get("delivery"):
+                lead_store.update_lead(phone, delivery=deliv)
         events.bump()  # push the move to every open panel
         return ("", 204)
     return ("invalid", 400)
@@ -471,6 +480,24 @@ _INFO_MODAL_HTML = """
     </div>
   </div>"""
 
+
+def _deliv_modal_html():
+    # asked when a card is dropped into Contacted, which has four possible tags
+    opts = "".join(
+        f'<button class="deliv-opt" type="button" data-deliv="{k}">'
+        f'<span class="chip {_DELIVERY_CHIP.get(k, "chip-muted")}">{T(DELIVERY_LABELS[k])}</span></button>'
+        for k in CONTACTED_DELIVERY_CHOICES
+    )
+    return f"""
+  <div id="deliv-modal" class="modal-overlay" hidden onclick="if(event.target===this)closeDeliv()">
+    <div class="modal-card">
+      <div class="modal-head"><span class="modal-title">{T("Qual o status do envio?")}</span>
+        <button class="modal-close" type="button" onclick="closeDeliv()">&times;</button></div>
+      <p class="modal-text">{T("Escolha como marcar este contato na coluna Contatados.")}</p>
+      <div class="deliv-opts">{opts}</div>
+    </div>
+  </div>"""
+
 # Live panel refresh: re-fetches the panel content every few seconds and swaps
 # it in place, so every section (campaign progress, funnel, rates, chart, hot
 # leads, board) reflects the campaign in real time. Preserves the search text
@@ -486,6 +513,7 @@ _LIVE_JS = """
     if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT')) return true;
     var sm = document.getElementById('state-modal'); if (sm && !sm.hidden) return true;
     var pm = document.getElementById('pwd-modal'); if (pm && !pm.hidden) return true;
+    var dm = document.getElementById('deliv-modal'); if (dm && !dm.hidden) return true;
     return false;
   }
   function apply() {
@@ -566,7 +594,7 @@ window.showState = function (k) {
 window.hideState = function () {
   var m = document.getElementById('state-modal'); if (m) m.hidden = true;
 };
-document.addEventListener('keydown', function (e) { if (e.key === 'Escape') window.hideState(); });
+document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { window.hideState(); if (window.closeDeliv) window.closeDeliv(); } });
 
 // Drag a card between columns to change its stage. Delegated on document so it
 // keeps working after the live refresh swaps the board's HTML.
@@ -595,6 +623,34 @@ document.addEventListener('keydown', function (e) { if (e.key === 'Escape') wind
     var body = e.target.closest && e.target.closest('.board-col-body');
     if (body && !body.contains(e.relatedTarget)) body.classList.remove('drop-hover');
   });
+  function moveCard(phone, body) {
+    var card = document.querySelector('.kanban-card[data-phone="' + phone + '"]');
+    if (card) {
+      var empty = body.querySelector('.board-empty'); if (empty) empty.remove();
+      body.appendChild(card);  // optimistic move; the push refresh reconciles counts
+    }
+  }
+  function postMove(phone, stage, deliv) {
+    var fd = new FormData(); fd.append('phone', phone); fd.append('stage', stage);
+    if (deliv) fd.append('delivery', deliv);
+    fetch('/board/etapa', { method: 'POST', body: fd, credentials: 'same-origin' }).catch(function () {});
+  }
+
+  // Contacted has four possible tags, so ask which one via the modal.
+  var pendingDrop = null;
+  window.closeDeliv = function () {
+    var m = document.getElementById('deliv-modal'); if (m) m.hidden = true;
+    pendingDrop = null;
+  };
+  document.addEventListener('click', function (e) {
+    var opt = e.target.closest && e.target.closest('.deliv-opt');
+    if (!opt || !pendingDrop) return;
+    var d = pendingDrop; pendingDrop = null;
+    var m = document.getElementById('deliv-modal'); if (m) m.hidden = true;
+    moveCard(d.phone, d.body);
+    postMove(d.phone, 'contatado', opt.getAttribute('data-deliv'));
+  });
+
   document.addEventListener('drop', function (e) {
     var body = e.target.closest && e.target.closest('.board-col-body');
     if (!body) return;
@@ -605,13 +661,15 @@ document.addEventListener('keydown', function (e) { if (e.key === 'Escape') wind
     var stage = body.getAttribute('data-stage');
     if (!phone || !stage) return;
     var card = document.querySelector('.kanban-card[data-phone="' + phone + '"]');
-    if (card) {
-      if (card.parentNode === body) return;  // same column, nothing to do
-      var empty = body.querySelector('.board-empty'); if (empty) empty.remove();
-      body.appendChild(card);  // optimistic move; the push refresh reconciles counts
+    if (card && card.parentNode === body) return;  // same column, nothing to do
+    if (stage === 'contatado') {
+      // pick the delivery tag before moving
+      pendingDrop = { phone: phone, body: body };
+      var m = document.getElementById('deliv-modal'); if (m) m.hidden = false;
+      return;
     }
-    var fd = new FormData(); fd.append('phone', phone); fd.append('stage', stage);
-    fetch('/board/etapa', { method: 'POST', body: fd, credentials: 'same-origin' }).catch(function () {});
+    moveCard(phone, body);
+    postMove(phone, stage, null);
   });
 })();
 </script>
@@ -1015,6 +1073,11 @@ _SHARED_CSS = """<style>
   .kanban-card.dragging { opacity: 0.45; }
   .board-col-body.drop-hover { outline: 2px dashed var(--accent); outline-offset: -4px; border-radius: 8px;
                                background: rgba(42,120,214,0.08); }
+  .deliv-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
+  .deliv-opt { display: flex; align-items: center; justify-content: center; padding: 14px 10px;
+               background: var(--page); border: 1px solid var(--border); border-radius: 10px;
+               cursor: pointer; transition: border-color .12s ease, transform .12s ease; }
+  .deliv-opt:hover { border-color: var(--accent); transform: translateY(-1px); }
   .kanban-phone { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; margin-top: 4px; }
   .kanban-email { font-size: 12px; color: var(--text-muted); margin-top: 2px; word-break: break-all; }
   .kanban-foot { margin-top: 8px; }
@@ -1596,7 +1659,7 @@ def _panel_sections():
   <section><h2>{T("Envios por dia")}</h2>{_daily_sends_chart()}</section>
   <section><h2>{T("Leads quentes ({n})", n=len(hot))}</h2>{cards}</section>
   <section><h2>{T("Contatos por status ({n})", n=len(leads))}</h2>{board_section}</section>
-  """ + _INFO_MODAL_HTML
+  """ + _INFO_MODAL_HTML + _deliv_modal_html()
 
 
 def _render_panel_html():
