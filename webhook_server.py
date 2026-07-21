@@ -819,12 +819,37 @@ document.addEventListener('submit', function (e) {
 # doesn't do a full reload. Page scripts are re-run (they guard against double
 # init); the panel refreshes its live data after being shown.
 _SPA_JS = """
+<style>
+  .spa-loading-bar { position: fixed; top: 0; left: 0; height: 2px; width: 0%;
+    background: var(--accent); z-index: 9999; opacity: 0;
+    transition: width .25s ease, opacity .2s ease; }
+  .spa-loading-bar.active { opacity: 1; }
+</style>
 <script>
 (function () {
   if (window.__spaInit || !window.history.pushState) return;
   window.__spaInit = true;
   var main = document.querySelector('main');
   if (!main) return;
+  var barEl = null;
+  function bar() {
+    if (!barEl) { barEl = document.createElement('div'); barEl.className = 'spa-loading-bar'; document.body.appendChild(barEl); }
+    return barEl;
+  }
+  function barStart() {
+    var b = bar();
+    b.style.transition = 'none'; b.style.width = '0%'; b.offsetHeight;  // reset, force reflow
+    b.style.transition = ''; b.classList.add('active');
+    requestAnimationFrame(function () { b.style.width = '70%'; });      // creeps while waiting
+  }
+  function barDone() {
+    if (!barEl || !barEl.classList.contains('active')) return;
+    barEl.style.width = '100%';
+    setTimeout(function () {
+      barEl.classList.remove('active');
+      setTimeout(function () { if (barEl) barEl.style.width = '0%'; }, 200);
+    }, 150);
+  }
   if ('scrollRestoration' in history) { history.scrollRestoration = 'manual'; }
   var cache = {};
   var scrollPos = {};                                  // remembered scroll per page
@@ -873,13 +898,14 @@ _SPA_JS = """
     if (cached) { show(url, cached.h, cached.t, pushIt); }   // instant paint from cache
     // The panel refreshes itself via __panelRefresh; nothing else to do when cached.
     if (cached && new URL(url, location.href).pathname === '/painel') { return; }
+    if (!cached) { barStart(); }   // no cached content to show yet: signal we're loading
     try {
       fetch(url, { credentials: 'same-origin' })
         .then(function (r) { if (!r.ok) throw 0; return r.text(); })
         .then(function (txt) {
           var doc = new DOMParser().parseFromString(txt, 'text/html');
           var nm = doc.querySelector('main');
-          if (!nm) { if (!cached) { location.href = url; } return; }
+          if (!nm) { barDone(); if (!cached) { location.href = url; } return; }
           var tEl = doc.querySelector('title');
           var t = tEl ? tEl.textContent : document.title;
           var fresh = nm.innerHTML;
@@ -893,9 +919,10 @@ _SPA_JS = """
             main.innerHTML = fresh; document.title = t; runScripts(main);
             window.scrollTo(0, y);
           }
+          barDone();
         })
-        .catch(function () { if (!cached) { location.href = url; } });
-    } catch (e) { if (!cached) { location.href = url; } }
+        .catch(function () { barDone(); if (!cached) { location.href = url; } });
+    } catch (e) { barDone(); if (!cached) { location.href = url; } }
   }
   document.addEventListener('click', function (e) {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
