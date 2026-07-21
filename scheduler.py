@@ -2,12 +2,14 @@
 Automation engine for the reactivation campaign.
 
 Runs as a daemon thread inside the web process. Each tick sends AT MOST one
-WhatsApp message, gated by three rules so the number stays healthy:
-  1. Warming ramp    - a per-day cap on total sends (day 1: 20, 2: 30, ... ).
-  2. Pacing gap      - a minimum interval between any two sends.
-  3. Auto follow-ups - non-responders get follow-up 1, then 2, after delays.
-Openers and follow-ups share the daily cap (total volume is what matters for
-blocks). Priority per tick: follow-up 2 > follow-up 1 > new opener.
+WhatsApp message, gated so the number stays healthy:
+  1. Pacing gap      - a minimum interval between any two sends.
+  2. Auto follow-ups - non-responders (opener sent, no reply) get a gentle
+                       re-engagement touch (follow-up 1), then a soft sign-off
+                       (follow-up 2), each after a configurable delay, and only
+                       inside daytime Sao Paulo hours.
+Priority per tick: follow-up 2 > follow-up 1 > new opener. Openers are queued
+by the operator (manual batch); follow-ups fire on their own once due.
 
 The core is tick(now, sender): a pure function that reads state, performs one
 action, and writes state, so it can be unit-tested with an injected clock and
@@ -31,6 +33,18 @@ MAX_DAILY = int(os.environ.get("MAX_DAILY", "100"))  # cap for day 6 onward
 SEND_GAP_SECONDS = int(os.environ.get("SEND_GAP_SECONDS", "8"))
 TICK_INTERVAL = int(os.environ.get("TICK_INTERVAL", "5"))
 MAX_FAIL_STREAK = int(os.environ.get("MAX_FAIL_STREAK", "5"))
+
+# Auto re-engagement follow-ups for non-responders (opener sent, no reply yet).
+# Delays are measured from the previous send to that lead; both touches are
+# approved templates, so they are allowed outside WhatsApp's 24h window.
+FOLLOWUP_ENABLED = os.environ.get("FOLLOWUP_ENABLED", "1").strip().lower() not in ("0", "false", "no", "")
+FOLLOWUP_DELAY1 = float(os.environ.get("FOLLOWUP_DELAY1_DAYS", "2")) * 86400   # gentle nudge
+FOLLOWUP_DELAY2 = float(os.environ.get("FOLLOWUP_DELAY2_DAYS", "3")) * 86400   # soft sign-off
+# Only auto-send follow-ups inside daytime Sao Paulo hours, so a reminder never
+# lands in the middle of the night. The opener is operator-triggered, so it is
+# not windowed here.
+FOLLOWUP_HOUR_START = int(os.environ.get("FOLLOWUP_HOUR_START", "9"))
+FOLLOWUP_HOUR_END = int(os.environ.get("FOLLOWUP_HOUR_END", "20"))
 
 PF_OPENERS = [f"reativacao_pf_faria_lima_v{i}" for i in range(1, 7)]
 PJ_OPENERS = ["reativacao_pj_faria_lima_v1", "reativacao_pj_faria_lima_v2"]
@@ -97,19 +111,87 @@ def _apply_success(lead, kind, template, resp_text, now):
     lead_store.append_history(lead["phone"], "bot", f"[{kind}:{template}]")
 
 
+def _daily_send_cap_remaining(camp, now):
+    """How many more sends (openers and follow-ups share the cap) are allowed today,
+    per the warm-up ramp. Lazily stamps the campaign's start_ts on first use, since
+    the ramp counts calendar days since the campaign first ran, not messages sent.
+    """
+    start_ts = camp.get("start_ts")
+    if start_ts is None:
+        start_ts = now
+        lead_store.set_campaign(start_ts=start_ts)
+    day = current_day(start_ts, now)
+    target = ramp_target(day)
+    day_start = _sp_day_start_ts(now)
+    sent_today = lead_store.count_ok_sends_between(day_start, day_start + 86400)
+    return target - sent_today
+
+
+def _within_followup_window(now):
+    """True if Sao Paulo local time is inside the daytime send window."""
+    hour = int(((now - _SP_OFFSET) % 86400) // 3600)
+    return FOLLOWUP_HOUR_START <= hour < FOLLOWUP_HOUR_END
+
+
+def _send_followup(lead, kind, sender, now):
+    """Send one re-engagement follow-up to a non-responder and record the outcome."""
+    template = _pick_template(lead, kind)
+    status, resp = sender(lead["phone"], template, _first_name(lead.get("nome")))
+    ok = status in (200, 201)
+    lead_store.record_send(lead["phone"], kind, template, now, ok)
+    if ok:
+        _apply_success(lead, kind, template, resp, now)
+        events.bump()
+        return {"action": "sent", "kind": kind, "phone": lead["phone"], "template": template}
+    # Failure: keep the API reason for the panel and push this lead's next
+    # attempt out by the delay (bump last_send_ts) so one bad number can't
+    # retry-storm every tick. followup_count stays put, so it is tried again
+    # after the delay rather than marked done.
+    fields = {"last_send_ts": now}
+    try:
+        import json
+        err = (json.loads(resp) or {}).get("error", {})
+        detail = (err.get("error_data") or {}).get("details") or err.get("message") or ""
+        fields["last_error"] = f"{err.get('code')}: {detail}"[:400]
+    except Exception:  # noqa: BLE001
+        pass
+    lead_store.update_lead(lead["phone"], **fields)
+    events.bump()
+    return {"action": "failed", "kind": kind, "phone": lead["phone"], "status": status}
+
+
 def tick(now=None, sender=None):
-    """Send at most one opener while a manual batch is pending. Returns a summary (or None)."""
+    """Send at most one message per tick: a due follow-up first, else a queued opener.
+
+    Total daily volume (openers and follow-ups together) is capped by the warm-up
+    ramp, so a large queued batch is worked gradually across days instead of all
+    at once -- this is what keeps the number healthy at scale.
+    """
     now = time.time() if now is None else now
     sender = sender or send.send_template
-
-    camp = lead_store.get_campaign()
-    remaining = camp.get("manual_remaining", 0) or 0
-    if camp["status"] != "running" or remaining <= 0:
-        return None
 
     last = lead_store.last_send_ts()
     if last is not None and (now - last) < SEND_GAP_SECONDS:
         return {"action": "wait", "reason": "gap"}
+
+    camp = lead_store.get_campaign()
+
+    if _daily_send_cap_remaining(camp, now) <= 0:
+        return {"action": "wait", "reason": "daily_cap"}
+
+    # 1) Auto follow-ups to non-responders. Independent of the manual opener
+    #    batch, but stands down if the campaign was paused (bad token/setup) or
+    #    it is outside the daytime send window.
+    if FOLLOWUP_ENABLED and camp["status"] != "paused" and _within_followup_window(now):
+        due = lead_store.due_followup(now, FOLLOWUP_DELAY1, FOLLOWUP_DELAY2)
+        if due:
+            fu_lead, kind = due
+            return _send_followup(fu_lead, kind, sender, now)
+
+    # 2) Manual opener batch.
+    remaining = camp.get("manual_remaining", 0) or 0
+    if camp["status"] != "running" or remaining <= 0:
+        return None
 
     lead = lead_store.next_pending_opener()
     if not lead:  # base exhausted
@@ -149,10 +231,14 @@ def tick(now=None, sender=None):
 
 
 def status_summary(now=None):
+    now = time.time() if now is None else now
     camp = lead_store.get_campaign()
     counts = lead_store.funnel_counts()
     total = counts.get("total", 0)
     pendente = counts.get("pendente", 0)
+    day_start = _sp_day_start_ts(now)
+    daily_sent = lead_store.count_ok_sends_between(day_start, day_start + 86400)
+    daily_target = ramp_target(current_day(camp["start_ts"], now)) if camp.get("start_ts") else ramp_target(1)
     return {
         "status": camp["status"],
         "remaining": camp.get("manual_remaining", 0) or 0,
@@ -160,6 +246,9 @@ def status_summary(now=None):
         "total_enviados": total - pendente,
         "pendentes": pendente,
         "fail_streak": camp["fail_streak"] or 0,
+        "daily_sent": daily_sent,
+        "daily_target": daily_target,
+        "daily_remaining": max(0, daily_target - daily_sent),
     }
 
 

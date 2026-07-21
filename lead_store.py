@@ -562,18 +562,27 @@ def get_notes(phone):
 
 
 def due_followup(now, delay1, delay2):
-    """Highest-priority follow-up due, or None. Only 'contatado' (no reply yet)."""
+    """Highest-priority follow-up due, or None.
+
+    Targets only genuine non-responders: the opener went out (delivery is
+    enviado/entregue/lido, never respondeu or falhou), the lead is still
+    'contatado' (no AI stage change), and the pacing delay since the last send
+    to that lead has elapsed. The delivery filter matters because an inbound
+    reply flips delivery to 'respondeu' before qualification runs, so even a
+    reply whose AI call errored (stage stuck at 'contatado') is excluded here.
+    """
     _ensure_init()
+    delivered = "delivery IN ('enviado','entregue','lido')"
     with _conn() as conn:
         row = conn.execute(
-            "SELECT * FROM leads WHERE stage='contatado' AND followup_count=1 "
+            f"SELECT * FROM leads WHERE stage='contatado' AND {delivered} AND followup_count=1 "
             "AND last_send_ts IS NOT NULL AND last_send_ts<=? ORDER BY last_send_ts LIMIT 1",
             (now - delay2,),
         ).fetchone()
         if row:
             return _row_to_lead(conn, row, with_history=False), "followup2"
         row = conn.execute(
-            "SELECT * FROM leads WHERE stage='contatado' AND followup_count=0 "
+            f"SELECT * FROM leads WHERE stage='contatado' AND {delivered} AND followup_count=0 "
             "AND last_send_ts IS NOT NULL AND last_send_ts<=? ORDER BY last_send_ts LIMIT 1",
             (now - delay1,),
         ).fetchone()
