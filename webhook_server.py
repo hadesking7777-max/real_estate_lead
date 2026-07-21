@@ -599,10 +599,11 @@ _LIVE_JS = """
     pending = false;
     var s0 = document.querySelector('.search');
     var q = s0 ? s0.value : '';
-    // on a navigation the router hands us the intended scroll (window.scrollY can be
-    // momentarily clamped mid-swap); otherwise keep the current position.
-    var sy = (typeof window.__navScroll === 'number') ? window.__navScroll : window.scrollY;
-    window.__navScroll = null;
+    // Set by show() only when arriving back from a contact's Details page; every
+    // other live refresh (the vast majority, since this fires on every SSE push)
+    // must never move the page scroll -- that was fighting the user's own scrolling.
+    var scrollBottom = window.__scrollBottomOnce === true;
+    window.__scrollBottomOnce = false;
     // remember the board's scroll so a refresh (e.g. right after a drag) doesn't jump it
     var board0 = document.querySelector('.board');
     var bx = board0 ? board0.scrollLeft : 0;
@@ -623,7 +624,8 @@ _LIVE_JS = """
           var st = colY[cb.getAttribute('data-stage')];
           if (st != null) cb.scrollTop = st;                   // keep each column's position
         });
-        window.scrollTo(0, sy);
+        if (scrollBottom) { window.scrollTo(0, document.body.scrollHeight); }
+        // otherwise: leave the page scroll exactly where the user has it
       })
       .catch(function () {});
   }
@@ -876,26 +878,33 @@ _SPA_JS = """
       a.classList.toggle('active', on);
     });
   }
-  function show(url, html, title, pushIt) {
+  function show(url, html, title, pushIt, fromContato) {
     main.innerHTML = html;
     if (title) { document.title = title; }
     var path = new URL(url, location.href).pathname;
     var k = keyOf(url);
-    var targetY = scrollPos.hasOwnProperty(k) ? scrollPos[k] : 0;
     setActive(path);
     runScripts(main);
-    window.scrollTo(0, targetY);
+    if (path === '/painel') {
+      // Painel scroll is owned by the live refresh below: force to the very
+      // bottom only when arriving back from a contact's Details page; every
+      // other arrival (nav click, fresh load, importar) leaves scroll untouched.
+      window.__scrollBottomOnce = !!fromContato;
+    } else {
+      var targetY = scrollPos.hasOwnProperty(k) ? scrollPos[k] : 0;
+      window.scrollTo(0, targetY);
+    }
     curKey = k;
     if (pushIt) { history.pushState({ spa: url }, '', url); }
     if (path === '/painel' && window.__panelRefresh) {
-      window.__navScroll = targetY;    // the refresh restores this, not a mid-swap value
       window.__panelRefresh();
     }
   }
   function go(url, pushIt) {
     scrollPos[curKey] = window.scrollY;   // remember where we were before leaving
+    var fromContato = curKey.indexOf('/contato/') === 0;
     var cached = cache[url];
-    if (cached) { show(url, cached.h, cached.t, pushIt); }   // instant paint from cache
+    if (cached) { show(url, cached.h, cached.t, pushIt, fromContato); }   // instant paint from cache
     // The panel refreshes itself via __panelRefresh; nothing else to do when cached.
     if (cached && new URL(url, location.href).pathname === '/painel') { return; }
     if (!cached) { barStart(); }   // no cached content to show yet: signal we're loading
@@ -912,7 +921,7 @@ _SPA_JS = """
           var differs = !cached || cached.h !== fresh;
           cache[url] = { h: fresh, t: t };
           if (!cached) {
-            show(url, fresh, t, pushIt);                       // first visit: normal show
+            show(url, fresh, t, pushIt, fromContato);           // first visit: normal show
           } else if (differs && keyOf(url) === curKey) {
             // already shown from cache and it changed: refresh in place (keep scroll/history)
             var y = window.scrollY;
