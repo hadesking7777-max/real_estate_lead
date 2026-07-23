@@ -75,6 +75,12 @@ EN = {
     "Parar envio": "Stop sending",
     "Enviar agora": "Send now",
     "Quantos contatos enviar agora": "How many contacts to send now",
+    "Piloto automatico ligado": "Autopilot on",
+    "Hoje: {a} de {b} enviados": "Today: {a} of {b} sent",
+    "Ligar piloto automatico": "Turn on autopilot",
+    "Desligar piloto automatico": "Turn off autopilot",
+    "O sistema trabalha a base pendente todo dia sozinho, dentro do limite seguro de envio":
+        "The system works the pending base on its own every day, within the safe sending limit",
     # panel section headings
     "Funil": "Funnel",
     "Taxas de conversao": "Conversion rates",

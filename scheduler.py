@@ -188,16 +188,34 @@ def tick(now=None, sender=None):
             fu_lead, kind = due
             return _send_followup(fu_lead, kind, sender, now)
 
-    # 2) Manual opener batch.
+    # 2) Manual opener batch takes priority whenever the operator has one queued.
     remaining = camp.get("manual_remaining", 0) or 0
-    if camp["status"] != "running" or remaining <= 0:
-        return None
+    if camp["status"] == "running" and remaining > 0:
+        lead = lead_store.next_pending_opener()
+        if not lead:  # base exhausted
+            lead_store.set_campaign(manual_remaining=0, status="idle")
+            return {"action": "idle", "reason": "no_pending"}
+        return _send_opener(lead, sender, now, manual_remaining=remaining)
 
-    lead = lead_store.next_pending_opener()
-    if not lead:  # base exhausted
-        lead_store.set_campaign(manual_remaining=0, status="idle")
-        return {"action": "idle", "reason": "no_pending"}
+    # 3) Autopilot: works the pending base on its own, day after day, with no
+    #    operator batch needed -- bounded only by the daily cap already checked
+    #    above. Stands down if paused, same as follow-ups do.
+    if camp.get("auto_mode") and camp["status"] != "paused":
+        lead = lead_store.next_pending_opener()
+        if lead:
+            return _send_opener(lead, sender, now, manual_remaining=None)
 
+    return None
+
+
+def _send_opener(lead, sender, now, manual_remaining=None):
+    """Send one opener and record the outcome.
+
+    manual_remaining, when given, means this send counts against an operator-
+    queued batch (decremented, batch finished at zero); when None, it's an
+    autopilot pull from the pending base with no counter to manage, gated only
+    by the daily cap the caller already checked.
+    """
     template = _pick_template(lead, "opener")
     status, resp = sender(lead["phone"], template, _first_name(lead.get("nome")))
     ok = status in (200, 201)
@@ -205,13 +223,17 @@ def tick(now=None, sender=None):
 
     if ok:
         _apply_success(lead, "opener", template, resp, now)
-        new_remaining = remaining - 1
-        fields = {"fail_streak": 0, "manual_remaining": new_remaining}
-        if new_remaining <= 0:
-            fields["status"] = "idle"
+        fields = {"fail_streak": 0}
+        result = {"action": "sent", "phone": lead["phone"], "template": template}
+        if manual_remaining is not None:
+            new_remaining = manual_remaining - 1
+            fields["manual_remaining"] = new_remaining
+            if new_remaining <= 0:
+                fields["status"] = "idle"
+            result["remaining"] = new_remaining
         lead_store.set_campaign(**fields)
         events.bump()  # state committed; push an update to any open panel
-        return {"action": "sent", "phone": lead["phone"], "template": template, "remaining": new_remaining}
+        return result
 
     lead_store.advance_delivery(lead["phone"], "falhou", actor="auto", source="campanha")
     try:  # keep the API error reason so the panel can show WHY it failed
@@ -221,7 +243,7 @@ def tick(now=None, sender=None):
         lead_store.update_lead(lead["phone"], last_error=f"{err.get('code')}: {detail}"[:400])
     except Exception:  # noqa: BLE001
         pass
-    streak = (camp["fail_streak"] or 0) + 1
+    streak = (lead_store.get_campaign()["fail_streak"] or 0) + 1
     fields = {"fail_streak": streak}
     if streak >= MAX_FAIL_STREAK:
         fields["status"] = "paused"  # stop after repeated failures (bad token/setup)
@@ -249,6 +271,7 @@ def status_summary(now=None):
         "daily_sent": daily_sent,
         "daily_target": daily_target,
         "daily_remaining": max(0, daily_target - daily_sent),
+        "auto_mode": camp.get("auto_mode", False),
     }
 
 
@@ -274,6 +297,21 @@ def queue_manual(n):
 def stop_manual():
     """Stop the current batch, clearing whatever is left in the queue."""
     r = lead_store.set_campaign(manual_remaining=0, manual_total=0, status="idle")
+    events.bump()
+    return r
+
+
+def set_auto_mode(on):
+    """Turn autopilot on/off: when on, tick() works the pending base on its own
+    every day (bounded by the daily ramp cap) with no manual batch needed.
+    Turning on clears any prior pause (same resume convention as queue_manual);
+    turning off only stops autopilot, it does not touch a manual batch that
+    might be running independently.
+    """
+    if on:
+        r = lead_store.set_campaign(auto_mode=True, status="running", fail_streak=0)
+    else:
+        r = lead_store.set_campaign(auto_mode=False)
     events.bump()
     return r
 

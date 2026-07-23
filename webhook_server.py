@@ -336,6 +336,14 @@ def campanha_parar():
     return ("", 204) if request.form.get("ajax") else redirect("/painel")
 
 
+@app.route("/campanha/auto", methods=["POST"])
+@_requires_auth
+def campanha_auto():
+    ligar = request.form.get("ligar") == "1"
+    scheduler.set_auto_mode(ligar)
+    return ("", 204) if request.form.get("ajax") else redirect("/painel")
+
+
 @app.route("/campanha/status")
 @_requires_auth
 def campanha_status():
@@ -1889,10 +1897,13 @@ def _daily_sends_chart():
 def _render_campaign():
     s = scheduler.status_summary()
     sending = s["status"] == "running" and s["remaining"] > 0
+    auto_on = s.get("auto_mode", False)
     if sending:
         chip, label = "chip-good", T("Enviando &middot; faltam {n}", n=s["remaining"])
     elif s["status"] == "paused":
         chip, label = "chip-info", T("Pausada")
+    elif auto_on:
+        chip, label = "chip-good", T("Piloto automatico ligado")
     else:
         chip, label = "chip-muted", T("Parada")
     warn = ""
@@ -1901,6 +1912,7 @@ def _render_campaign():
                 + T("Envio pausado automaticamente apos varias falhas seguidas. Confirme os modelos aprovados e o token antes de enviar de novo.")
                 + '</div>')
     metrics = T("Total enviados {a} &middot; Pendentes {b}", a=s["total_enviados"], b=s["pendentes"])
+    daily = T("Hoje: {a} de {b} enviados", a=s["daily_sent"], b=s["daily_target"])
     # while sending, show a stop button; otherwise the manual "send N" form
     if sending:
         control = ('<form method="post" action="/campanha/parar" class="campaign-form">'
@@ -1914,6 +1926,14 @@ def _render_campaign():
             f'value="{default_q}" title="{T("Quantos contatos enviar agora")}">'
             f'<button class="btn btn-primary" type="submit">{T("Enviar agora")}</button>'
             '</form>')
+    auto_control = (
+        '<form method="post" action="/campanha/auto" class="campaign-form auto-form">'
+        f'<input type="hidden" name="ligar" value="{"0" if auto_on else "1"}">'
+        f'<button class="btn btn-ghost" type="submit" '
+        f'title="{T("O sistema trabalha a base pendente todo dia sozinho, dentro do limite seguro de envio")}">'
+        f'{T("Desligar piloto automatico") if auto_on else T("Ligar piloto automatico")}'
+        '</button></form>'
+    )
     progress = ""
     if sending and s["total"]:
         pct = int((s["total"] - s["remaining"]) / s["total"] * 100)
@@ -1928,8 +1948,10 @@ def _render_campaign():
         <div class="campaign-info">
           <span class="chip {chip}" id="camp-chip">{label}</span>
           <span class="campaign-metrics" id="camp-metrics">{metrics}</span>
+          <span class="campaign-metrics">{daily}</span>
         </div>
         {control}
+        {auto_control}
       </div>
       {progress}
     </div>

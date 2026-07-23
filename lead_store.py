@@ -150,6 +150,8 @@ def _migrate_schema(conn):
         conn.execute("ALTER TABLE campaign ADD COLUMN manual_remaining INTEGER DEFAULT 0")
     if "manual_total" not in camp_cols:
         conn.execute("ALTER TABLE campaign ADD COLUMN manual_total INTEGER DEFAULT 0")
+    if "auto_mode" not in camp_cols:
+        conn.execute("ALTER TABLE campaign ADD COLUMN auto_mode INTEGER DEFAULT 0")
     # guarantee the single campaign row exists
     conn.execute("INSERT OR IGNORE INTO campaign(id, status, fail_streak) VALUES(1, 'idle', 0)")
     conn.commit()
@@ -434,14 +436,15 @@ def get_campaign():
     _ensure_init()
     with _conn() as conn:
         r = conn.execute(
-            "SELECT status, start_ts, fail_streak, manual_remaining, manual_total FROM campaign WHERE id=1"
+            "SELECT status, start_ts, fail_streak, manual_remaining, manual_total, auto_mode FROM campaign WHERE id=1"
         ).fetchone()
         return {"status": r["status"], "start_ts": r["start_ts"], "fail_streak": r["fail_streak"],
-                "manual_remaining": r["manual_remaining"] or 0, "manual_total": r["manual_total"] or 0}
+                "manual_remaining": r["manual_remaining"] or 0, "manual_total": r["manual_total"] or 0,
+                "auto_mode": bool(r["auto_mode"])}
 
 
 def set_campaign(**fields):
-    allowed = {"status", "start_ts", "fail_streak", "manual_remaining", "manual_total"}
+    allowed = {"status", "start_ts", "fail_streak", "manual_remaining", "manual_total", "auto_mode"}
     sets, vals = [], []
     for k, v in fields.items():
         if k in allowed:
