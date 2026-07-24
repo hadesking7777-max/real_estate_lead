@@ -16,11 +16,13 @@ action, and writes state, so it can be unit-tested with an injected clock and
 a fake sender. The background thread just calls tick() on an interval.
 """
 
+import json
 import logging
 import os
 import threading
 import time
 
+import alerts
 import events
 import lead_store
 import send
@@ -33,6 +35,12 @@ MAX_DAILY = int(os.environ.get("MAX_DAILY", "100"))  # cap for day 6 onward
 SEND_GAP_SECONDS = int(os.environ.get("SEND_GAP_SECONDS", "8"))
 TICK_INTERVAL = int(os.environ.get("TICK_INTERVAL", "5"))
 MAX_FAIL_STREAK = int(os.environ.get("MAX_FAIL_STREAK", "5"))
+
+# How often to poll the WhatsApp number's own connection status (independent of
+# whether anything is actively being sent), so a degrading/banned number is
+# caught even during a quiet period with no pending sends to fail on.
+HEALTH_CHECK_INTERVAL = int(os.environ.get("HEALTH_CHECK_INTERVAL_SECONDS", str(30 * 60)))
+WEEKLY_SUMMARY_INTERVAL = int(os.environ.get("WEEKLY_SUMMARY_INTERVAL_SECONDS", str(7 * 86400)))
 
 # Auto re-engagement follow-ups for non-responders (opener sent, no reply yet).
 # Delays are measured from the previous send to that lead; both touches are
@@ -97,9 +105,20 @@ def _wamid(resp_text):
 def _apply_success(lead, kind, template, resp_text, now):
     wamid = _wamid(resp_text)
     if kind == "opener":
-        lead_store.update_lead(lead["phone"], stage="contatado", delivery="enviado",
-                               last_template_used=template, last_wamid=wamid, last_send_ts=now)
-        if lead.get("stage") != "contatado":
+        # The outbound API call above can take up to send.py's 30s timeout, in
+        # which window an operator or an inbound webhook event could have
+        # changed this lead's stage (e.g. a manual opt-out). Re-check right
+        # before writing and only force stage->contatado if it's unchanged
+        # since we read it; the delivery/template/wamid facts are recorded
+        # either way, since the send itself genuinely happened.
+        current = lead_store.get_lead(lead["phone"]) or lead
+        fields = {"delivery": "enviado", "last_template_used": template,
+                  "last_wamid": wamid, "last_send_ts": now}
+        stage_unchanged = current.get("stage") == lead.get("stage")
+        if stage_unchanged:
+            fields["stage"] = "contatado"
+        lead_store.update_lead(lead["phone"], **fields)
+        if stage_unchanged and lead.get("stage") != "contatado":
             lead_store.log_state(lead["phone"], "stage", lead.get("stage"), "contatado",
                                  actor="auto", source="campanha", ts=now)
         if lead.get("delivery") != "enviado":
@@ -123,7 +142,7 @@ def _daily_send_cap_remaining(camp, now):
     day = current_day(start_ts, now)
     target = ramp_target(day)
     day_start = _sp_day_start_ts(now)
-    sent_today = lead_store.count_ok_sends_between(day_start, day_start + 86400)
+    sent_today = lead_store.count_sends_between(day_start, day_start + 86400)
     return target - sent_today
 
 
@@ -180,9 +199,11 @@ def tick(now=None, sender=None):
         return {"action": "wait", "reason": "daily_cap"}
 
     # 1) Auto follow-ups to non-responders. Independent of the manual opener
-    #    batch, but stands down if the campaign was paused (bad token/setup) or
-    #    it is outside the daytime send window.
-    if FOLLOWUP_ENABLED and camp["status"] != "paused" and _within_followup_window(now):
+    #    batch, but stands down if the campaign was paused (bad token/setup),
+    #    the operator hit "Parar envio" (outreach_paused), or it is outside the
+    #    daytime send window.
+    if (FOLLOWUP_ENABLED and camp["status"] != "paused" and not camp.get("outreach_paused")
+            and _within_followup_window(now)):
         due = lead_store.due_followup(now, FOLLOWUP_DELAY1, FOLLOWUP_DELAY2)
         if due:
             fu_lead, kind = due
@@ -199,8 +220,8 @@ def tick(now=None, sender=None):
 
     # 3) Autopilot: works the pending base on its own, day after day, with no
     #    operator batch needed -- bounded only by the daily cap already checked
-    #    above. Stands down if paused, same as follow-ups do.
-    if camp.get("auto_mode") and camp["status"] != "paused":
+    #    above. Stands down if paused or outreach_paused, same as follow-ups do.
+    if camp.get("auto_mode") and camp["status"] != "paused" and not camp.get("outreach_paused"):
         lead = lead_store.next_pending_opener()
         if lead:
             return _send_opener(lead, sender, now, manual_remaining=None)
@@ -236,17 +257,25 @@ def _send_opener(lead, sender, now, manual_remaining=None):
         return result
 
     lead_store.advance_delivery(lead["phone"], "falhou", actor="auto", source="campanha")
+    last_error = ""
     try:  # keep the API error reason so the panel can show WHY it failed
-        import json
         err = (json.loads(resp) or {}).get("error", {})
         detail = (err.get("error_data") or {}).get("details") or err.get("message") or ""
-        lead_store.update_lead(lead["phone"], last_error=f"{err.get('code')}: {detail}"[:400])
+        last_error = f"{err.get('code')}: {detail}"[:400]
+        lead_store.update_lead(lead["phone"], last_error=last_error)
     except Exception:  # noqa: BLE001
         pass
     streak = (lead_store.get_campaign()["fail_streak"] or 0) + 1
     fields = {"fail_streak": streak}
     if streak >= MAX_FAIL_STREAK:
         fields["status"] = "paused"  # stop after repeated failures (bad token/setup)
+        # tick()'s manual/autopilot gates both exclude status=="paused", so this
+        # can only be reached once per failure streak (a resume always resets
+        # fail_streak to 0 first) -- safe to alert unconditionally here.
+        try:
+            alerts.send_campaign_paused_alert(streak, last_error)
+        except Exception:  # noqa: BLE001
+            logging.exception("failed to send campaign-paused alert")
     lead_store.set_campaign(**fields)
     events.bump()
     return {"action": "failed", "phone": lead["phone"], "status": status, "streak": streak}
@@ -259,7 +288,7 @@ def status_summary(now=None):
     total = counts.get("total", 0)
     pendente = counts.get("pendente", 0)
     day_start = _sp_day_start_ts(now)
-    daily_sent = lead_store.count_ok_sends_between(day_start, day_start + 86400)
+    daily_sent = lead_store.count_sends_between(day_start, day_start + 86400)
     daily_target = ramp_target(current_day(camp["start_ts"], now)) if camp.get("start_ts") else ramp_target(1)
     return {
         "status": camp["status"],
@@ -289,14 +318,20 @@ def queue_manual(n):
     total = remaining if current <= 0 else (camp.get("manual_total", 0) or 0) + added
     status = "running" if remaining > 0 else "idle"
     r = lead_store.set_campaign(manual_remaining=remaining, manual_total=total,
-                                status=status, fail_streak=0)
+                                status=status, fail_streak=0, outreach_paused=False)
     events.bump()
     return r
 
 
 def stop_manual():
-    """Stop the current batch, clearing whatever is left in the queue."""
-    r = lead_store.set_campaign(manual_remaining=0, manual_total=0, status="idle")
+    """"Parar envio": stop absolutely everything, not just the manual batch --
+    clears the manual queue, turns autopilot off, and sets outreach_paused so
+    follow-ups (which run independently of both) stand down too. Resuming
+    either manual sending (queue_manual) or autopilot (set_auto_mode(True))
+    clears outreach_paused again.
+    """
+    r = lead_store.set_campaign(manual_remaining=0, manual_total=0, status="idle",
+                                auto_mode=False, outreach_paused=True)
     events.bump()
     return r
 
@@ -309,11 +344,94 @@ def set_auto_mode(on):
     might be running independently.
     """
     if on:
-        r = lead_store.set_campaign(auto_mode=True, status="running", fail_streak=0)
+        r = lead_store.set_campaign(auto_mode=True, status="running", fail_streak=0,
+                                    outreach_paused=False)
     else:
         r = lead_store.set_campaign(auto_mode=False)
     events.bump()
     return r
+
+
+# --- account health check ---
+
+_last_health_check = 0.0
+
+
+def _maybe_alert_health(status, quality, detail):
+    """Alert on a CHANGE from the last recorded status, not on every check --
+    otherwise an unresolved issue would re-alert every HEALTH_CHECK_INTERVAL
+    forever. Alerts both on degrading (entering a non-CONNECTED state) and on
+    recovering back to CONNECTED, so the operator also learns when it's fixed.
+    """
+    prev_status = lead_store.get_setting("wa_health_status")
+    lead_store.set_setting("wa_health_status", status or "")
+    lead_store.set_setting("wa_health_quality", quality or "")
+    if status == prev_status:
+        return
+    is_unhealthy = status != "CONNECTED"
+    was_unhealthy = prev_status not in (None, "CONNECTED")
+    if is_unhealthy or was_unhealthy:
+        try:
+            alerts.send_health_alert(prev_status, status, quality, detail)
+        except Exception:  # noqa: BLE001
+            logging.exception("failed to send WhatsApp health alert")
+
+
+def _check_account_health(now):
+    global _last_health_check
+    if now - _last_health_check < HEALTH_CHECK_INTERVAL:
+        return
+    _last_health_check = now
+    try:
+        status_code, body = send.check_health()
+    except Exception:  # noqa: BLE001
+        logging.exception("WhatsApp health check request failed")
+        return
+    if status_code != 200:
+        _maybe_alert_health("ERRO_API", None, f"HTTP {status_code}: {body[:200]}")
+        return
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return
+    _maybe_alert_health(data.get("status"), data.get("quality_rating"), None)
+
+
+# --- weekly summary email ---
+
+def _campaign_status_label(now):
+    s = status_summary(now)
+    if s["status"] == "paused":
+        return f"pausada (streak de falhas: {s['fail_streak']})"
+    if s.get("auto_mode"):
+        return "piloto automatico ligado"
+    if s["status"] == "running" and s["remaining"] > 0:
+        return f"enviando (faltam {s['remaining']} do lote atual)"
+    return "parada"
+
+
+def _maybe_send_weekly_summary(now):
+    """Sends a digest of what happened since the LAST summary (not a fixed
+    trailing 7 days), so a gap -- the process being down, a late tick -- never
+    loses or double-counts activity; it just reports on the real elapsed span.
+    """
+    last_sent = float(lead_store.get_setting("last_weekly_summary_ts") or 0)
+    if last_sent == 0:
+        # first run ever: nothing to summarize yet, just establish the
+        # baseline so the first real digest lands a full interval from now.
+        lead_store.set_setting("last_weekly_summary_ts", str(now))
+        return
+    if now - last_sent < WEEKLY_SUMMARY_INTERVAL:
+        return
+    counts = lead_store.funnel_counts()
+    sent_count = lead_store.count_ok_sends_between(last_sent, now)
+    new_hot_count = lead_store.count_state_transitions("stage", "quente", last_sent, now)
+    status_label = _campaign_status_label(now)
+    try:
+        alerts.send_weekly_summary(counts, sent_count, new_hot_count, status_label)
+    except Exception:  # noqa: BLE001
+        logging.exception("failed to send weekly summary email")
+    lead_store.set_setting("last_weekly_summary_ts", str(now))
 
 
 # --- background thread ---
@@ -327,6 +445,14 @@ def _run_loop():
             tick()
         except Exception:  # noqa: BLE001
             logging.exception("scheduler tick failed")
+        try:
+            _check_account_health(time.time())
+        except Exception:  # noqa: BLE001
+            logging.exception("account health check failed")
+        try:
+            _maybe_send_weekly_summary(time.time())
+        except Exception:  # noqa: BLE001
+            logging.exception("weekly summary check failed")
         time.sleep(TICK_INTERVAL)
 
 

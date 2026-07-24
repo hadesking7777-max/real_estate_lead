@@ -59,6 +59,7 @@ EN = {
     "Usuario": "Username",
     "Senha": "Password",
     "Usuario ou senha invalidos.": "Invalid username or password.",
+    "Muitas tentativas de login. Tente novamente em {n} minutos.": "Too many login attempts. Try again in {n} minutes.",
     # account modal
     "Senha atual": "Current password",
     "Nova senha (minimo 6 caracteres)": "New password (minimum 6 characters)",
@@ -113,6 +114,7 @@ EN = {
     "{n} de {d}": "{n} of {d}",
     # hot cards + signals
     "QUENTE": "HOT",
+    "Quente ha {n} dias": "Hot for {n} days",
     "Objetivo": "Goal",
     "Experiencia": "Experience",
     "Forma de pagamento": "Payment method",
@@ -283,6 +285,7 @@ PT = {
     "Usuario": "Utilizador",
     "Senha": "Palavra-passe",
     "Usuario ou senha invalidos.": "Utilizador ou palavra-passe invalidos.",
+    "Muitas tentativas de login. Tente novamente em {n} minutos.": "Demasiadas tentativas de login. Tente novamente dentro de {n} minutos.",
     "Senha atual": "Palavra-passe atual",
     "Nova senha (minimo 6 caracteres)": "Nova palavra-passe (minimo 6 caracteres)",
     "Confirmar nova senha": "Confirmar nova palavra-passe",

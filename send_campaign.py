@@ -24,6 +24,7 @@ Re-running the same day is safe: contacts already sent to are no longer
 
 import argparse
 import json
+import sys
 import time
 
 import lead_store
@@ -65,11 +66,32 @@ def _wamid(resp_text):
         return None
 
 
+def _refuse_if_live_system_active():
+    """This script has its own ramp/pacing, completely uncoordinated with
+    scheduler.py's daily cap, autopilot, and fail-streak pause. Running it
+    while the live webhook_server.py system is actively sending would let
+    both draw from the same pending pool at once, with no shared cap --
+    exactly the kind of double-send / blown-ramp risk the whole warm-up
+    system exists to prevent. Refuse to run if the live system looks active.
+    """
+    camp = lead_store.get_campaign()
+    if camp.get("auto_mode"):
+        print("Refusing to run: autopilot is ON in the live panel (Configuracoes/Campanha). "
+              "Turn it off first, or just let autopilot handle sending instead of this script.")
+        sys.exit(1)
+    if camp.get("status") == "running" and (camp.get("manual_remaining") or 0) > 0:
+        print("Refusing to run: a manual batch is currently active in the live panel. "
+              "Let it finish or stop it first (Parar envio).")
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--day", type=int, required=True, choices=list(RAMP.keys()))
     parser.add_argument("--pause", type=float, default=1.5, help="seconds between sends")
     args = parser.parse_args()
+
+    _refuse_if_live_system_active()
 
     pending = pending_leads()
     limit = RAMP[args.day]

@@ -19,9 +19,11 @@ Give Lucas the same public URL + /painel, plus PANEL_USER/PANEL_PASSWORD.
 """
 
 import hashlib
+import hmac
 import html
 import json
 import os
+import secrets
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -47,13 +49,41 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8 MB cap on uploads
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "changeme")
 PANEL_USER = os.environ.get("PANEL_USER", "lucas")
-PANEL_PASSWORD = os.environ.get("PANEL_PASSWORD", "changeme")
+_panel_password_env = os.environ.get("PANEL_PASSWORD")
+if _panel_password_env:
+    PANEL_PASSWORD = _panel_password_env
+elif lead_store.get_setting("panel_password_hash"):
+    # a real password was already set via the panel (Conta > Alterar senha);
+    # this constant is just a fallback and is never checked in that case.
+    PANEL_PASSWORD = None
+else:
+    # Neither PANEL_PASSWORD nor a saved password hash exists -- refuse to fall
+    # back to a fixed, guessable default (this file is a public template, so a
+    # hardcoded default would be a known credential across every deployment).
+    # Generate a random one-time password and print it so the operator can log
+    # in and set a real one immediately.
+    PANEL_PASSWORD = secrets.token_urlsafe(12)
+    print(
+        f"[bidcyrela] No PANEL_PASSWORD set and no saved panel password found.\n"
+        f"[bidcyrela] Generated a temporary login password for user '{PANEL_USER}': {PANEL_PASSWORD}\n"
+        f"[bidcyrela] Log in with it and change it right away (panel > Conta > Alterar senha), "
+        f"or set PANEL_PASSWORD in the environment.",
+    )
 # Stable session-signing secret derived from the panel credentials (survives
 # restarts without a separate env var; changes only if the password changes).
 app.secret_key = hashlib.sha256(
     (PANEL_USER + PANEL_PASSWORD + "bidcyrela-session-v1").encode()
 ).hexdigest()
 app.permanent_session_lifetime = timedelta(days=7)
+# Session cookie hardening: HttpOnly blocks JS/XSS access to the cookie, SameSite=Lax
+# stops it being sent on cross-site requests (the main CSRF defense here, since the
+# panel has no separate CSRF token), Secure keeps it off plain HTTP. The webhook is
+# only reachable over HTTPS in production (Meta requires it); SESSION_COOKIE_SECURE
+# can be turned off for local http:// testing.
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get(
+    "SESSION_COOKIE_SECURE", "1").strip().lower() not in ("0", "false", "no", "")
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -86,6 +116,10 @@ STAGE_LABELS = {
     "opt_out": "Opt-out",
 }
 
+# A hot lead sitting this many days without closing gets flagged in the panel --
+# these are time-sensitive investor leads, so "hot" shouldn't quietly go cold.
+STALE_HOT_DAYS = int(os.environ.get("STALE_HOT_DAYS", "3"))
+
 # WhatsApp status event -> our delivery state
 _WA_STATUS_MAP = {
     "sent": "enviado",
@@ -100,13 +134,49 @@ DELIVERY_LABELS = {
 }
 
 
+def _consteq(a, b):
+    # Plain == short-circuits on the first differing byte, so a naive compare
+    # leaks how many leading characters an attacker's guess got right through
+    # response timing. hmac.compare_digest runs in constant time regardless.
+    return hmac.compare_digest((a or "").encode("utf-8"), (b or "").encode("utf-8"))
+
+
 def _creds_ok(user, pw):
     if user != PANEL_USER:
         return False
     stored = lead_store.get_setting("panel_password_hash")
     if stored:
-        return check_password_hash(stored, pw)
-    return pw == PANEL_PASSWORD
+        return check_password_hash(stored, pw)  # werkzeug already compares in constant time
+    return _consteq(pw, PANEL_PASSWORD)
+
+
+# --- login throttling: DB-backed (not an in-memory dict) so it holds up once
+# this moves behind gunicorn with multiple worker processes, not just today's
+# single-process run. One shared counter is enough (there's a single valid
+# account), so this isn't per-IP -- simpler, and avoids trusting spoofable
+# X-Forwarded-For headers to identify a client behind a proxy.
+MAX_LOGIN_ATTEMPTS = 5
+LOGIN_LOCKOUT_SECONDS = 300
+
+
+def _login_locked_seconds_left():
+    locked_until = float(lead_store.get_setting("login_locked_until") or 0)
+    remaining = locked_until - time.time()
+    return remaining if remaining > 0 else 0
+
+
+def _register_login_failure():
+    count = int(lead_store.get_setting("login_fail_count") or 0) + 1
+    if count >= MAX_LOGIN_ATTEMPTS:
+        lead_store.set_setting("login_locked_until", str(time.time() + LOGIN_LOCKOUT_SECONDS))
+        lead_store.set_setting("login_fail_count", "0")
+    else:
+        lead_store.set_setting("login_fail_count", str(count))
+
+
+def _clear_login_throttle():
+    lead_store.set_setting("login_fail_count", "0")
+    lead_store.set_setting("login_locked_until", "0")
 
 
 def _requires_auth(f):
@@ -138,10 +208,17 @@ def login():
 @app.route("/login", methods=["POST"])
 def login_post():
     nxt = _safe_next(request.form.get("next", "/painel"))
+    locked_left = _login_locked_seconds_left()
+    if locked_left > 0:
+        minutes = max(1, int(locked_left // 60) + (1 if locked_left % 60 else 0))
+        return _render_login(error=T("Muitas tentativas de login. Tente novamente em {n} minutos.", n=minutes),
+                             next_url=nxt), 429
     if _creds_ok(request.form.get("usuario", ""), request.form.get("senha", "")):
+        _clear_login_throttle()
         session.permanent = True
         session["auth"] = True
         return redirect(nxt)
+    _register_login_failure()
     return _render_login(error=T("Usuario ou senha invalidos."), next_url=nxt), 401
 
 
@@ -172,21 +249,31 @@ def verify():
     mode = request.args.get("hub.mode")
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
-    if mode == "subscribe" and token == VERIFY_TOKEN:
+    if mode == "subscribe" and _consteq(token, VERIFY_TOKEN):
         return challenge, 200
     return "Forbidden", 403
 
 
 @app.route("/webhook", methods=["POST"])
 def receive():
+    # Always ack with 200 regardless of what happens inside, even if one
+    # message/status blows up -- a 500 here makes Meta retry the WHOLE batch,
+    # which (pre-idempotency-check aside) just compounds any failure into a
+    # retry storm. Each item is isolated so one bad payload can't sink the rest.
     payload = request.get_json(force=True, silent=True) or {}
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
             for message in value.get("messages", []):
-                _handle_message(value, message)
+                try:
+                    _handle_message(value, message)
+                except Exception:  # noqa: BLE001 -- isolate one bad message from the rest
+                    app.logger.exception("Failed to handle inbound message: %s", message.get("id"))
             for status in value.get("statuses", []):
-                _handle_status(status)
+                try:
+                    _handle_status(status)
+                except Exception:  # noqa: BLE001 -- isolate one bad status from the rest
+                    app.logger.exception("Failed to handle status update: %s", status)
     return jsonify({"status": "ok"}), 200
 
 
@@ -213,17 +300,61 @@ def _handle_status(status):
         events.bump()  # delivery status changed; push to open panels
 
 
+def _record_reply_send_failure(phone, status, resp_text):
+    """A reply we tried to send back to a lead failed. Previously this was
+    only logged server-side -- the panel would show the bot's reply already
+    in history and the stage possibly already advanced (even to quente) with
+    no visible sign the lead never actually received it. Record last_error
+    (surfaced on the contact page) the same way scheduler.py already does for
+    campaign send failures, so it isn't silently misleading.
+    """
+    app.logger.error("Reply send failed for %s: %s %s", phone, status, resp_text)
+    lead_store.advance_delivery(phone, "falhou", actor="auto", source="whatsapp")
+    try:
+        err = (json.loads(resp_text) or {}).get("error", {})
+        detail = (err.get("error_data") or {}).get("details") or err.get("message") or ""
+        lead_store.update_lead(phone, last_error=f"{err.get('code')}: {detail}"[:400])
+    except Exception:  # noqa: BLE001 -- best-effort error capture, never itself raise
+        pass
+    events.bump()
+
+
+_NON_TEXT_LABELS = {
+    "image": "uma imagem", "audio": "um audio", "video": "um video",
+    "document": "um documento", "sticker": "uma figurinha",
+    "location": "uma localizacao", "reaction": "uma reacao", "contacts": "um contato",
+}
+
+
 def _handle_message(value, message):
-    if message.get("type") != "text":
+    # Meta can redeliver the same webhook event if it doesn't get a fast enough
+    # 200 back; skip anything we've already handled rather than double-process
+    # (double AI call, double reply to the same inbound message).
+    if lead_store.already_processed(message.get("id")):
         return
 
     phone = message["from"]
-    text = message["text"]["body"]
-
     contacts = value.get("contacts", [])
     nome = contacts[0]["profile"]["name"] if contacts else None
-
     lead = lead_store.get_or_create_lead(phone, nome=nome)
+
+    if message.get("type") != "text":
+        # No AI/qualification for non-text (photos, audio, stickers, ...) --
+        # log it so it's visible in the conversation, and ask for text instead
+        # of just going silent.
+        kind = _NON_TEXT_LABELS.get(message.get("type"), "esse tipo de mensagem")
+        lead_store.append_history(phone, "lead", f"[recebeu {kind}, sem suporte a leitura]")
+        lead_store.advance_delivery(phone, "respondeu", actor="auto", source="whatsapp")
+        reply_text = ("Recebi sua mensagem, mas por aqui so consigo ler texto. "
+                      "Pode escrever em poucas palavras o que voce gostaria de saber?")
+        lead_store.append_history(phone, "bot", reply_text)
+        events.bump()
+        status, resp_text = send.send_text(phone, reply_text)
+        if status not in (200, 201):
+            _record_reply_send_failure(phone, status, resp_text)
+        return
+
+    text = message["text"]["body"]
     lead_store.append_history(phone, "lead", text)
     lead_store.advance_delivery(phone, "respondeu", actor="auto", source="whatsapp")
 
@@ -246,7 +377,7 @@ def _handle_message(value, message):
 
     status, resp_text = send.send_text(phone, reply_text)
     if status not in (200, 201):
-        app.logger.error("Send failed for %s: %s %s", phone, status, resp_text)
+        _record_reply_send_failure(phone, status, resp_text)
 
 
 @app.route("/painel")
@@ -260,6 +391,20 @@ def painel():
 def painel_fragmento():
     # inner content only, for the live refresh to swap into <main>
     return _panel_sections()
+
+
+# Leading characters spreadsheet apps (Excel, Sheets, LibreOffice) treat as the
+# start of a formula. Several exported fields (name, origin, AI-parsed chat
+# signals) are ultimately attacker-controlled -- a lead's WhatsApp display name
+# or a chat reply the AI copies into a signal -- so a value like
+# =HYPERLINK("http://evil","click") would execute if opened as-is. Prefixing
+# with a quote forces spreadsheet apps to treat it as plain text.
+_CSV_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value):
+    s = "" if value is None else str(value)
+    return "'" + s if s and s[0] in _CSV_FORMULA_TRIGGERS else s
 
 
 @app.route("/contatos/exportar")
@@ -280,14 +425,14 @@ def contatos_exportar():
                       "tags", "objetivo", "experiencia", "forma_pagamento", "quantidade_unidades", "timing"])
     for l in leads:
         signals = l.get("signals") or {}
-        writer.writerow([
+        writer.writerow([_csv_safe(v) for v in [
             l.get("nome") or "", l["phone"], l.get("email") or "", l.get("perfil") or "",
             l.get("origem") or "", l.get("pais") or "", l.get("stage") or "", l.get("delivery") or "",
             ", ".join(tags_by_phone.get(l["phone"], [])),
             signals.get("objetivo") or "", signals.get("experiencia") or "",
             signals.get("forma_pagamento") or "", signals.get("quantidade_unidades") or "",
             signals.get("timing") or "",
-        ])
+        ]])
     # BOM so Excel opens the UTF-8 file with accented characters displaying correctly
     csv_bytes = "﻿" + buf.getvalue()
     filename = f"contatos_{stage_filter or 'todos'}.csv"
@@ -1271,6 +1416,7 @@ _SHARED_CSS = """<style>
   .funnel-pct { font-size: 12px; color: var(--text-muted); font-weight: 400; }
 
   .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px 20px; margin-bottom: 12px; box-shadow: var(--shadow); }
+  .card-stale { border-left: 3px solid var(--status-bad); }
   .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 6px; }
   .name { font-weight: 600; font-size: 15px; }
   .badge-row { display: flex; gap: 8px; align-items: center; }
@@ -2055,18 +2201,26 @@ def _panel_sections():
             (quente_n, responded, "Taxa de qualificacao", "taxa_qualificacao")]
     )
 
+    hot_since = lead_store.hot_since_map()
+    now_ts = time.time()
     cards = ""
     for lead in hot:
         s = lead["signals"]
         lead_messages = [h for h in lead["history"] if h["role"] == "lead"]
         ultima = lead_messages[-1]["text"] if lead_messages else ""
+        became_ts = hot_since.get(lead["phone"])
+        days_hot = int((now_ts - became_ts) // 86400) if became_ts else 0
+        stale = became_ts is not None and days_hot >= STALE_HOT_DAYS
+        stale_chip = (f'<span class="chip chip-bad">{T("Quente ha {n} dias", n=days_hot)}</span>'
+                      if stale else "")
         cards += f"""
-        <div class="card">
+        <div class="card{' card-stale' if stale else ''}">
           <div class="card-head">
             <span class="name">{_e(lead['nome'] or T('(sem nome)'))}</span>
             <span class="badge-row">
               <span class="badge">{_e(lead['perfil'])}</span>
               <span class="chip chip-good">&#9679; {T("QUENTE")}</span>
+              {stale_chip}
             </span>
           </div>
           <div class="phone">{_e(lead['phone'])}{f" &middot; {_e(lead['email'])}" if lead.get('email') else ""}</div>

@@ -41,6 +41,23 @@ def send_text(to, body):
     return resp.status_code, resp.text
 
 
+def check_health():
+    """GET the phone number's own status + quality rating (not a message send).
+    Used by scheduler.py's periodic health check so a degrading/banned number
+    can be caught even when nothing is actively being sent to trigger a failure.
+    Returns (status_code, response_text); status_code is 0 on a network-level
+    failure (no response at all), so callers can treat that the same way.
+    """
+    phone_number_id = _cfg("PHONE_NUMBER_ID")
+    url = f"https://graph.facebook.com/{GRAPH_VERSION}/{phone_number_id}"
+    try:
+        resp = requests.get(url, headers=_headers(),
+                            params={"fields": "status,quality_rating,verified_name"}, timeout=15)
+        return resp.status_code, resp.text
+    except requests.RequestException as e:
+        return 0, str(e)
+
+
 def send_template(to, template_name, name_param, language="pt_BR"):
     payload = {
         "messaging_product": "whatsapp",

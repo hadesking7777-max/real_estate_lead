@@ -2,3 +2,5 @@ flask
 anthropic
 requests
 openpyxl
+gunicorn
+pytest

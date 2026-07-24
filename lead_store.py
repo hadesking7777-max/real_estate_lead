@@ -8,6 +8,7 @@ On first use it auto-migrates a legacy leads.json (if present) into the DB,
 so existing imported contacts and any conversation history carry over.
 """
 
+import functools
 import json
 import os
 import re
@@ -62,7 +63,8 @@ CREATE TABLE IF NOT EXISTS campaign (
   start_ts REAL,
   fail_streak INTEGER DEFAULT 0,
   manual_remaining INTEGER DEFAULT 0,
-  manual_total INTEGER DEFAULT 0
+  manual_total INTEGER DEFAULT 0,
+  outreach_paused INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
@@ -98,6 +100,10 @@ CREATE TABLE IF NOT EXISTS state_log (
   to_val TEXT,
   source TEXT
 );
+CREATE TABLE IF NOT EXISTS processed_messages (
+  message_id TEXT PRIMARY KEY,
+  ts REAL
+);
 CREATE INDEX IF NOT EXISTS idx_state_log_phone ON state_log(phone);
 CREATE INDEX IF NOT EXISTS idx_history_phone ON history(phone);
 CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(stage);
@@ -117,10 +123,36 @@ def _empty_signals():
 
 
 def _conn():
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+    # timeout is how long sqlite3 internally waits/retries before raising
+    # "database is locked" -- 30s covers realistic contention (a large import
+    # holding the writer lock while the webhook/scheduler also want to write).
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
+
+
+def _retry_on_locked(max_attempts=3, base_delay=0.2):
+    """Decorator: outer safety net on top of _conn()'s own busy-timeout. If a
+    write still hits "database is locked" after that internal wait, retry the
+    whole call a few times with backoff before giving up. Concurrent writers
+    here are real: inbound webhooks, the scheduler's tick(), and panel actions
+    all hit the same SQLite file.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            attempt = 0
+            while True:
+                try:
+                    return fn(*args, **kwargs)
+                except sqlite3.OperationalError as e:
+                    attempt += 1
+                    if "locked" not in str(e).lower() or attempt >= max_attempts:
+                        raise
+                    time.sleep(base_delay * attempt)
+        return wrapper
+    return decorator
 
 
 def _ensure_init():
@@ -152,6 +184,8 @@ def _migrate_schema(conn):
         conn.execute("ALTER TABLE campaign ADD COLUMN manual_total INTEGER DEFAULT 0")
     if "auto_mode" not in camp_cols:
         conn.execute("ALTER TABLE campaign ADD COLUMN auto_mode INTEGER DEFAULT 0")
+    if "outreach_paused" not in camp_cols:
+        conn.execute("ALTER TABLE campaign ADD COLUMN outreach_paused INTEGER DEFAULT 0")
     # guarantee the single campaign row exists
     conn.execute("INSERT OR IGNORE INTO campaign(id, status, fail_streak) VALUES(1, 'idle', 0)")
     conn.commit()
@@ -240,6 +274,7 @@ def get_or_create_lead(phone, nome=None, perfil="PF"):
         return _row_to_lead(conn, row)
 
 
+@_retry_on_locked()
 def import_contacts(contacts):
     _ensure_init()
     imported = skipped = 0
@@ -278,6 +313,7 @@ def delete_lead(phone):
         return existed
 
 
+@_retry_on_locked()
 def update_lead(phone, **fields):
     _ensure_init()
     with _conn() as conn:
@@ -297,6 +333,7 @@ def update_lead(phone, **fields):
         return _row_to_lead(conn, row)
 
 
+@_retry_on_locked()
 def append_history(phone, role, text):
     _ensure_init()
     with _conn() as conn:
@@ -313,6 +350,7 @@ def _insert_state_log(conn, phone, field, from_val, to_val, actor, source, ts):
     )
 
 
+@_retry_on_locked()
 def log_state(phone, field, from_val, to_val, actor="auto", source="", ts=None):
     """Record a stage/delivery change for the contact's history."""
     _ensure_init()
@@ -331,19 +369,28 @@ def get_state_log(phone, limit=100):
         return [dict(r) for r in rows]
 
 
+@_retry_on_locked()
 def set_stage(phone, stage, actor="auto", source="", ts=None):
     if stage not in STAGES:
         raise ValueError(f"Unknown stage: {stage}")
     _ensure_init()
     with _conn() as conn:
         row = conn.execute("SELECT stage FROM leads WHERE phone=?", (phone,)).fetchone()
-        old = (row["stage"] if row else None)
+        if row is None:
+            raise KeyError(f"Lead {phone} not found, call get_or_create_lead first")
+        old = row["stage"]
+        # the stage change and its audit-log entry commit together, atomically,
+        # so a crash or a concurrent delete between them can't leave the audit
+        # trail claiming a transition that never actually landed (or vice versa)
+        conn.execute("UPDATE leads SET stage=? WHERE phone=?", (stage, phone))
         if old != stage:
             _insert_state_log(conn, phone, "stage", old, stage, actor, source, ts)
-            conn.commit()
-    return update_lead(phone, stage=stage)
+        conn.commit()
+        full = conn.execute("SELECT * FROM leads WHERE phone=?", (phone,)).fetchone()
+        return _row_to_lead(conn, full)
 
 
+@_retry_on_locked()
 def set_delivery(phone, new_state, actor="auto", source="", ts=None):
     """Set the delivery state directly (may move backward) and log the change."""
     if new_state not in _DELIVERY_RANK:
@@ -362,6 +409,7 @@ def set_delivery(phone, new_state, actor="auto", source="", ts=None):
         return _row_to_lead(conn, full)
 
 
+@_retry_on_locked()
 def advance_delivery(phone, new_state, actor="auto", source="", ts=None):
     if new_state not in _DELIVERY_RANK:
         return None
@@ -415,6 +463,20 @@ def hot_leads():
         return [_row_to_lead(conn, r) for r in rows]
 
 
+def hot_since_map():
+    """phone -> ts of the most recent transition INTO stage='quente', for every
+    phone that has one on record. Batched (one query, not one per card) so the
+    panel can flag hot leads that have been sitting a while without closing.
+    """
+    _ensure_init()
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT phone, MAX(ts) AS ts FROM state_log WHERE field='stage' AND to_val='quente' "
+            "GROUP BY phone"
+        ).fetchall()
+        return {r["phone"]: r["ts"] for r in rows}
+
+
 # ---------- campaign state + send log (used by the automation scheduler) ----------
 
 def get_setting(key, default=None):
@@ -436,15 +498,17 @@ def get_campaign():
     _ensure_init()
     with _conn() as conn:
         r = conn.execute(
-            "SELECT status, start_ts, fail_streak, manual_remaining, manual_total, auto_mode FROM campaign WHERE id=1"
+            "SELECT status, start_ts, fail_streak, manual_remaining, manual_total, auto_mode, "
+            "outreach_paused FROM campaign WHERE id=1"
         ).fetchone()
         return {"status": r["status"], "start_ts": r["start_ts"], "fail_streak": r["fail_streak"],
                 "manual_remaining": r["manual_remaining"] or 0, "manual_total": r["manual_total"] or 0,
-                "auto_mode": bool(r["auto_mode"])}
+                "auto_mode": bool(r["auto_mode"]), "outreach_paused": bool(r["outreach_paused"])}
 
 
 def set_campaign(**fields):
-    allowed = {"status", "start_ts", "fail_streak", "manual_remaining", "manual_total", "auto_mode"}
+    allowed = {"status", "start_ts", "fail_streak", "manual_remaining", "manual_total", "auto_mode",
+               "outreach_paused"}
     sets, vals = [], []
     for k, v in fields.items():
         if k in allowed:
@@ -458,12 +522,32 @@ def set_campaign(**fields):
     return get_campaign()
 
 
+@_retry_on_locked()
 def record_send(phone, kind, template, ts, ok):
     _ensure_init()
     with _conn() as conn:
         conn.execute("INSERT INTO sends(phone, kind, template, ts, ok) VALUES(?,?,?,?,?)",
                      (phone, kind, template, ts, 1 if ok else 0))
         conn.commit()
+
+
+def already_processed(message_id, ts=None):
+    """Idempotency guard for inbound webhook events: WhatsApp can redeliver the
+    same message if it doesn't get a fast enough 200 response. Returns True if
+    this message_id was already handled (caller should skip re-processing),
+    False and records it as processed otherwise. Atomic via INSERT OR IGNORE
+    plus rowcount, so two near-simultaneous deliveries can't both pass.
+    """
+    if not message_id:
+        return False  # no id to dedupe on -- process it, better than dropping
+    _ensure_init()
+    with _conn() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO processed_messages(message_id, ts) VALUES(?,?)",
+            (message_id, ts if ts is not None else time.time()),
+        )
+        conn.commit()
+        return cur.rowcount == 0  # 0 rows inserted -> the id was already there
 
 
 def last_send_ts():
@@ -478,6 +562,33 @@ def count_ok_sends_between(ts_from, ts_to):
     with _conn() as conn:
         r = conn.execute("SELECT COUNT(*) AS c FROM sends WHERE ok=1 AND ts>=? AND ts<?",
                          (ts_from, ts_to)).fetchone()
+        return r["c"]
+
+
+def count_sends_between(ts_from, ts_to):
+    """All send attempts (successful or not) in the window. Used for the daily
+    ramp cap: a failed attempt still hit WhatsApp's API and can still affect
+    the number's quality rating, so it must count against the cap same as a
+    successful one -- otherwise scattered failures let the ramp be exceeded.
+    """
+    _ensure_init()
+    with _conn() as conn:
+        r = conn.execute("SELECT COUNT(*) AS c FROM sends WHERE ts>=? AND ts<?",
+                         (ts_from, ts_to)).fetchone()
+        return r["c"]
+
+
+def count_state_transitions(field, to_val, ts_from, ts_to):
+    """How many times `field` (e.g. 'stage') changed TO `to_val` (e.g. 'quente')
+    within [ts_from, ts_to). Used for digest/summary reporting off the same
+    audit trail set_stage/set_delivery/advance_delivery already write to.
+    """
+    _ensure_init()
+    with _conn() as conn:
+        r = conn.execute(
+            "SELECT COUNT(*) AS c FROM state_log WHERE field=? AND to_val=? AND ts>=? AND ts<?",
+            (field, to_val, ts_from, ts_to),
+        ).fetchone()
         return r["c"]
 
 

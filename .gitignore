@@ -1,9 +1,10 @@
 __pycache__/
 *.pyc
+.pytest_cache/
 leads*.json
-leads.db
-leads.db-wal
-leads.db-shm
+leads*.db
+leads*.db-wal
+leads*.db-shm
 leads*.json.migrated
 history*.json
 .env
