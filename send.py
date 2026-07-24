@@ -1,22 +1,31 @@
 """
 Graph API send helpers, shared by the webhook server and manual scripts.
-Reads PHONE_NUMBER_ID and WHATSAPP_TOKEN from the environment, never hardcode.
+Reads PHONE_NUMBER_ID and WHATSAPP_TOKEN from the settings UI (Configuracoes,
+stored in the DB) when set there, otherwise falls back to the environment --
+never hardcode.
 """
 
 import os
 import requests
 
+import lead_store
+
 GRAPH_VERSION = "v20.0"
 
 
+def _cfg(key):
+    val = lead_store.get_setting(key)
+    return val if val else os.environ.get(key, "")
+
+
 def _url():
-    phone_number_id = os.environ["PHONE_NUMBER_ID"]
+    phone_number_id = _cfg("PHONE_NUMBER_ID")
     return f"https://graph.facebook.com/{GRAPH_VERSION}/{phone_number_id}/messages"
 
 
 def _headers():
     return {
-        "Authorization": f"Bearer {os.environ['WHATSAPP_TOKEN']}",
+        "Authorization": f"Bearer {_cfg('WHATSAPP_TOKEN')}",
         "Content-Type": "application/json",
     }
 

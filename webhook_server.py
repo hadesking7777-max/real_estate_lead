@@ -902,7 +902,7 @@ _SPA_JS = """
 
   function spaPage(path) {
     return path.indexOf('/painel') === 0 || path.indexOf('/importar') === 0
-        || path.indexOf('/contato/') === 0;
+        || path.indexOf('/contato/') === 0 || path.indexOf('/configuracoes') === 0;
   }
   function runScripts(root) {
     root.querySelectorAll('script').forEach(function (old) {
@@ -1481,6 +1481,11 @@ _SHARED_CSS = """<style>
   .modal-input { width: 100%; padding: 10px 12px; border-radius: 9px; border: 1px solid var(--border);
                  background: var(--page); color: var(--text-primary); font-size: 14px; }
   .modal-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--status-info-bg); }
+  .settings-form { max-width: 480px; }
+  .settings-group-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
+                           color: var(--text-secondary); margin: 22px 0 4px; }
+  .settings-group-title:first-child { margin-top: 0; }
+  .settings-save-row { margin-top: 18px; }
   @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
   @keyframes pop { from { opacity: 0; transform: translateY(6px) scale(0.98); } to { opacity: 1; transform: none; } }
 
@@ -1582,6 +1587,18 @@ _NAV_ICON_IMPORT = (
     '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
     '<polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>'
 )
+_NAV_ICON_SETTINGS = (
+    '<svg class="nav-ic" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" '
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    '<circle cx="12" cy="12" r="3"/>'
+    '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 '
+    '1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 '
+    '2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 '
+    '1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a '
+    '1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 '
+    '0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 '
+    '1.65 0 0 0-1.51 1z"/></svg>'
+)
 def _lang_menu():
     cur = i18n.current()
     nxt = _e(request.path if request else "/painel")
@@ -1615,6 +1632,7 @@ def _nav(active):
     return ('<nav class="nav"><div class="nav-inner">'
             + item("/painel", T("Painel"), "painel", _NAV_ICON_FUNNEL)
             + item("/importar", T("Importar base"), "importar", _NAV_ICON_IMPORT)
+            + item("/configuracoes", T("Configuracoes"), "configuracoes", _NAV_ICON_SETTINGS)
             + '<span class="nav-spacer"></span>'
             + account
             + "</div></nav>")
@@ -2217,6 +2235,57 @@ def _render_import_form(erro=None):
     <div id="history-live">{_render_history()}</div>
   </section>""" + _import_js() + _IMPORT_LIVE_JS
     return _page(T("Importar base"), T("Importacao de contatos"), "importar", body)
+
+
+def _cfg_value(key):
+    return lead_store.get_setting(key) or os.environ.get(key) or ""
+
+
+@app.route("/configuracoes", methods=["GET", "POST"])
+@_requires_auth
+def configuracoes():
+    if request.method == "POST":
+        phone_id = (request.form.get("PHONE_NUMBER_ID") or "").strip()
+        if phone_id:
+            lead_store.set_setting("PHONE_NUMBER_ID", phone_id)
+        for key in ("WHATSAPP_TOKEN", "ANTHROPIC_API_KEY"):
+            val = (request.form.get(key) or "").strip()
+            if val:  # blank means "keep the current value" -- secrets are never re-displayed
+                lead_store.set_setting(key, val)
+        events.bump()
+        return redirect("/configuracoes?saved=1")
+
+    phone_id = _cfg_value("PHONE_NUMBER_ID")
+    has_token = bool(_cfg_value("WHATSAPP_TOKEN").strip())
+    has_key = bool(_cfg_value("ANTHROPIC_API_KEY").strip())
+    token_chip = (f'<span class="chip chip-good">{T("Configurado")}</span>' if has_token
+                  else f'<span class="chip chip-muted">{T("Nao configurado")}</span>')
+    key_chip = (f'<span class="chip chip-good">{T("Configurado")}</span>' if has_key
+                else f'<span class="chip chip-muted">{T("Nao configurado")}</span>')
+    saved = (f'<div class="alert alert-good">{T("Configuracoes salvas.")}</div>'
+             if request.args.get("saved") else "")
+    body = f"""
+  {saved}
+  <section>
+    <h2>{T("Configuracoes")}</h2>
+    <form method="post" action="/configuracoes" class="settings-form">
+      <div class="settings-group-title">{T("WhatsApp")}</div>
+      <label class="modal-label">{T("ID do numero do WhatsApp")}</label>
+      <input class="modal-input" type="text" name="PHONE_NUMBER_ID" value="{_e(phone_id)}"
+             placeholder="{T('Ex: 1187310294469355')}">
+      <label class="modal-label">{T("Token de acesso do WhatsApp")} {token_chip}</label>
+      <input class="modal-input" type="password" name="WHATSAPP_TOKEN" autocomplete="new-password"
+             placeholder="{T('Deixe em branco para manter o valor atual')}">
+      <div class="settings-group-title">{T("Claude")}</div>
+      <label class="modal-label">{T("Chave da API da Claude")} {key_chip}</label>
+      <input class="modal-input" type="password" name="ANTHROPIC_API_KEY" autocomplete="new-password"
+             placeholder="{T('Deixe em branco para manter o valor atual')}">
+      <div class="settings-save-row">
+        <button class="btn btn-primary" type="submit">{T("Salvar")}</button>
+      </div>
+    </form>
+  </section>"""
+    return _page(T("Configuracoes"), T("Configuracoes do projeto"), "configuracoes", body)
 
 
 def _render_import_review(token, a):

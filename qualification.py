@@ -7,6 +7,8 @@ message and updates stage/signals per the roteiro's scoring rules.
 import os
 import anthropic
 
+import lead_store
+
 MODEL = "claude-sonnet-5"
 
 SYSTEM_PROMPT = """Voce e um assistente que conduz, via WhatsApp, a qualificacao de investidores
@@ -71,9 +73,10 @@ TOOL = {
 
 
 def _client():
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = lead_store.get_setting("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        raise RuntimeError("Set ANTHROPIC_API_KEY before calling the qualification engine.")
+        raise RuntimeError("Set ANTHROPIC_API_KEY (via Configuracoes or the environment) before "
+                           "calling the qualification engine.")
     return anthropic.Anthropic(api_key=api_key)
 
 

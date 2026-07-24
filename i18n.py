@@ -83,6 +83,17 @@ EN = {
         "The system works the pending base on its own every day, within the safe sending limit",
     "Exportar tudo": "Export all",
     "Exportar quentes": "Export hot leads",
+    # settings page
+    "Configuracoes": "Settings",
+    "Configuracoes do projeto": "Project settings",
+    "ID do numero do WhatsApp": "WhatsApp phone number ID",
+    "Token de acesso do WhatsApp": "WhatsApp access token",
+    "Configurado": "Configured",
+    "Nao configurado": "Not configured",
+    "Chave da API da Claude": "Claude API key",
+    "Deixe em branco para manter o valor atual": "Leave blank to keep the current value",
+    "Configuracoes salvas.": "Settings saved.",
+    "Ex: 1187310294469355": "e.g. 1187310294469355",
     # panel section headings
     "Funil": "Funnel",
     "Taxas de conversao": "Conversion rates",
