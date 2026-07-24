@@ -33,6 +33,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import lead_store
 import qualification
 import send
+import alerts
 import base_import
 import run_history
 import scheduler
@@ -233,6 +234,13 @@ def _handle_message(value, message):
     lead_store.update_lead(phone, **updates)
     if new_stage:
         lead_store.set_stage(phone, new_stage, actor="auto", source="ia")
+        if new_stage == "quente" and lead.get("stage") != "quente":
+            # fire once, on the actual transition into quente, not on every
+            # later message from a lead that's already hot
+            try:
+                alerts.send_hot_lead_alert(lead_store.get_lead(phone))
+            except Exception:  # noqa: BLE001 -- alerting must never break the reply flow
+                pass
     lead_store.append_history(phone, "bot", reply_text)
     events.bump()  # reply + qualification updated the contact; push to open panels
 
@@ -2248,20 +2256,28 @@ def configuracoes():
         phone_id = (request.form.get("PHONE_NUMBER_ID") or "").strip()
         if phone_id:
             lead_store.set_setting("PHONE_NUMBER_ID", phone_id)
-        for key in ("WHATSAPP_TOKEN", "ANTHROPIC_API_KEY"):
+        for key in ("WHATSAPP_TOKEN", "ANTHROPIC_API_KEY", "SMTP_PASSWORD"):
             val = (request.form.get(key) or "").strip()
             if val:  # blank means "keep the current value" -- secrets are never re-displayed
                 lead_store.set_setting(key, val)
+        for key in ("ALERT_EMAIL_TO", "SMTP_USER"):
+            val = (request.form.get(key) or "").strip()
+            lead_store.set_setting(key, val)  # plain addresses: safe to overwrite with blank
         events.bump()
         return redirect("/configuracoes?saved=1")
 
     phone_id = _cfg_value("PHONE_NUMBER_ID")
+    alert_to = _cfg_value("ALERT_EMAIL_TO")
+    smtp_user = _cfg_value("SMTP_USER")
     has_token = bool(_cfg_value("WHATSAPP_TOKEN").strip())
     has_key = bool(_cfg_value("ANTHROPIC_API_KEY").strip())
+    has_smtp_pw = bool(_cfg_value("SMTP_PASSWORD").strip())
     token_chip = (f'<span class="chip chip-good">{T("Configurado")}</span>' if has_token
                   else f'<span class="chip chip-muted">{T("Nao configurado")}</span>')
     key_chip = (f'<span class="chip chip-good">{T("Configurado")}</span>' if has_key
                 else f'<span class="chip chip-muted">{T("Nao configurado")}</span>')
+    smtp_chip = (f'<span class="chip chip-good">{T("Configurado")}</span>' if has_smtp_pw
+                 else f'<span class="chip chip-muted">{T("Nao configurado")}</span>')
     saved = (f'<div class="alert alert-good">{T("Configuracoes salvas.")}</div>'
              if request.args.get("saved") else "")
     body = f"""
@@ -2279,6 +2295,16 @@ def configuracoes():
       <div class="settings-group-title">{T("Claude")}</div>
       <label class="modal-label">{T("Chave da API da Claude")} {key_chip}</label>
       <input class="modal-input" type="password" name="ANTHROPIC_API_KEY" autocomplete="new-password"
+             placeholder="{T('Deixe em branco para manter o valor atual')}">
+      <div class="settings-group-title">{T("Aviso de lead quente")}</div>
+      <label class="modal-label">{T("Email que recebe o aviso")}</label>
+      <input class="modal-input" type="email" name="ALERT_EMAIL_TO" value="{_e(alert_to)}"
+             placeholder="{T('seuemail@exemplo.com')}">
+      <label class="modal-label">{T("Email usado para enviar (Gmail)")}</label>
+      <input class="modal-input" type="email" name="SMTP_USER" value="{_e(smtp_user)}"
+             placeholder="{T('conta@gmail.com')}">
+      <label class="modal-label">{T("Senha de app do Gmail")} {smtp_chip}</label>
+      <input class="modal-input" type="password" name="SMTP_PASSWORD" autocomplete="new-password"
              placeholder="{T('Deixe em branco para manter o valor atual')}">
       <div class="settings-save-row">
         <button class="btn btn-primary" type="submit">{T("Salvar")}</button>

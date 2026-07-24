@@ -94,6 +94,10 @@ EN = {
     "Deixe em branco para manter o valor atual": "Leave blank to keep the current value",
     "Configuracoes salvas.": "Settings saved.",
     "Ex: 1187310294469355": "e.g. 1187310294469355",
+    "Aviso de lead quente": "Hot lead alert",
+    "Email que recebe o aviso": "Email that receives the alert",
+    "Email usado para enviar (Gmail)": "Email used to send (Gmail)",
+    "Senha de app do Gmail": "Gmail app password",
     # panel section headings
     "Funil": "Funnel",
     "Taxas de conversao": "Conversion rates",
