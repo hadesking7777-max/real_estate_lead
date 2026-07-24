@@ -81,6 +81,8 @@ EN = {
     "Desligar piloto automatico": "Turn off autopilot",
     "O sistema trabalha a base pendente todo dia sozinho, dentro do limite seguro de envio":
         "The system works the pending base on its own every day, within the safe sending limit",
+    "Exportar tudo": "Export all",
+    "Exportar quentes": "Export hot leads",
     # panel section headings
     "Funil": "Funnel",
     "Taxas de conversao": "Conversion rates",

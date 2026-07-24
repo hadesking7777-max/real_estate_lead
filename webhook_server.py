@@ -254,6 +254,39 @@ def painel_fragmento():
     return _panel_sections()
 
 
+@app.route("/contatos/exportar")
+@_requires_auth
+def contatos_exportar():
+    stage_filter = request.args.get("stage", "")
+    leads = lead_store.all_leads()
+    if stage_filter:
+        leads = [l for l in leads if l.get("stage") == stage_filter]
+    leads.sort(key=lambda l: l.get("nome") or "")
+    tags_by_phone = lead_store.tags_map()
+
+    import csv
+    import io
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["nome", "telefone", "email", "perfil", "origem", "pais", "estagio", "entrega",
+                      "tags", "objetivo", "experiencia", "forma_pagamento", "quantidade_unidades", "timing"])
+    for l in leads:
+        signals = l.get("signals") or {}
+        writer.writerow([
+            l.get("nome") or "", l["phone"], l.get("email") or "", l.get("perfil") or "",
+            l.get("origem") or "", l.get("pais") or "", l.get("stage") or "", l.get("delivery") or "",
+            ", ".join(tags_by_phone.get(l["phone"], [])),
+            signals.get("objetivo") or "", signals.get("experiencia") or "",
+            signals.get("forma_pagamento") or "", signals.get("quantidade_unidades") or "",
+            signals.get("timing") or "",
+        ])
+    # BOM so Excel opens the UTF-8 file with accented characters displaying correctly
+    csv_bytes = "﻿" + buf.getvalue()
+    filename = f"contatos_{stage_filter or 'todos'}.csv"
+    return Response(csv_bytes, mimetype="text/csv",
+                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
 @app.route("/eventos")
 @_requires_auth
 def eventos():
@@ -1251,6 +1284,9 @@ _SHARED_CSS = """<style>
             border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary);
             font-size: 14px; transition: border-color .15s ease, box-shadow .15s ease; }
   .search:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--status-info-bg); }
+  .board-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .board-toolbar .search { width: auto; flex: 1; min-width: 200px; margin-bottom: 0; }
+  .board-toolbar .btn { white-space: nowrap; }
   .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); }
   table { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--surface-1); }
   th { text-align: left; padding: 11px 13px; color: var(--text-muted); font-weight: 700; font-size: 11px;
@@ -2082,7 +2118,11 @@ def _panel_sections():
                          + '</div>')
     else:
         board_section = f"""
-        <input class="search" type="search" placeholder="{T("Buscar por nome, telefone, email ou tag...")}" oninput="filterRows(this.value)">
+        <div class="board-toolbar">
+          <input class="search" type="search" placeholder="{T("Buscar por nome, telefone, email ou tag...")}" oninput="filterRows(this.value)">
+          <a class="btn btn-ghost" href="/contatos/exportar">{T("Exportar tudo")}</a>
+          <a class="btn btn-ghost" href="/contatos/exportar?stage=quente">{T("Exportar quentes")}</a>
+        </div>
         <div class="board">{cols_html}</div>"""
 
     conta_map = {
